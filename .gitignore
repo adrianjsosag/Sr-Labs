@@ -1,0 +1,76 @@
+# =============================================================================
+# .gitignore – Sr-Labs
+# Aplica a todo el proyecto: los patrones con **/ cubren cualquier módulo,
+# actual o futuro, sin necesidad de un .gitignore por carpeta.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Terraform
+# -----------------------------------------------------------------------------
+# Providers y módulos descargados (se regeneran con `terraform init`)
+**/.terraform/
+
+# State: contiene IDs, IPs y posibles secretos. Nunca se sube a git.
+*.tfstate
+*.tfstate.*
+
+# Planes guardados con `terraform plan -out=...`
+*.tfplan
+
+# Logs de errores de Terraform
+crash.log
+crash.*.log
+
+# Overrides locales (cambios personales que no deben compartirse)
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Configuración local del CLI de Terraform
+.terraformrc
+terraform.rc
+
+# tfvars con secretos (los *.tfvars normales SÍ se suben)
+*secret*.tfvars
+*secret*.tfvars.json
+
+# NOTA: .terraform.lock.hcl NO se ignora. Fija las versiones de los providers
+# y debe subirse a git.
+
+# -----------------------------------------------------------------------------
+# Llaves y secretos
+# -----------------------------------------------------------------------------
+*.pem
+*.key
+**/private-key/
+.env
+.env.*
+
+# -----------------------------------------------------------------------------
+# Salidas locales de provisioners (local-exec)
+# -----------------------------------------------------------------------------
+**/local-exec-output-files/
+
+# -----------------------------------------------------------------------------
+# Copias de seguridad de switch-launch-type.sh (cambio Fargate <-> EC2)
+# -----------------------------------------------------------------------------
+**/.launch-type-backup/
+
+# -----------------------------------------------------------------------------
+# Sistema operativo
+# -----------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# -----------------------------------------------------------------------------
+# Editores
+# -----------------------------------------------------------------------------
+.idea/
+*.swp
+*~
+# VS Code: se ignora todo salvo la configuración que sí conviene compartir
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
