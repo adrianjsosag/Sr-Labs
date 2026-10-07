@@ -17,7 +17,7 @@
 #     {"plan":[...], "apply":[...], "removed":[...]}
 #   Cada lista contiene objetos {"name": "<proyecto>", "dir": "<ruta a su manifests/>"}:
 #     plan     proyectos a validar y planificar
-#     apply    proyectos que el pipeline puede aplicar (= plan sin EC2-bastion-host-module)
+#     apply    proyectos que el pipeline puede aplicar (hoy es la misma lista que plan)
 #     removed  directorios de servicios que ya no existen (sus recursos pueden seguir en AWS)
 #   Dentro de GitHub Actions escribe además en $GITHUB_OUTPUT (outputs del step):
 #     plan, apply, removed (los JSON) y has_plan / has_apply / has_removed / bastion_changed (true|false)
@@ -26,11 +26,13 @@
 #   - Solo cuentan archivos .tf, .tfvars y .terraform.lock.hcl dentro de <proyecto>/manifests/
 #     (un README o un script no disparan ningún plan).
 #   - Un cambio en ECS-services-module/modules/** (módulo común) afecta a TODOS los servicios.
-#   - S3-tfstate-backend-module y GitHub-OIDC-module se ignoran: siempre se aplican a mano.
-#   - EC2-bastion-host-module se planifica pero el pipeline nunca lo aplica: sus provisioners se
-#     conectan por SSH desde quien aplica y escriben el .pem en local. Se aplica desde tu PC o
-#     con el workflow manual.
-#   - Orden: VPC -> ALB -> ECS-cluster -> EC2-bastion-host -> ECR -> servicios (alfabético).
+#   - Se ignoran por completo (no entran en ninguna lista) y siempre se gestionan a mano desde tu PC:
+#       S3-tfstate-backend-module  (bucket del state)
+#       GitHub-OIDC-module         (permisos del propio pipeline)
+#       EC2-bastion-host-module    (sus provisioners se conectan por SSH desde quien aplica y escriben
+#                                   el .pem en local: no encaja en un runner de GitHub)
+#     Si cambia el Bastion, se devuelve bastion_changed=true para que el workflow avise.
+#   - Orden: VPC -> ALB -> ECS-cluster -> ECR -> servicios (alfabético).
 #
 # VARIABLES OPCIONALES
 #   TF_ROOT    raíz de los proyectos (por defecto Serverless/ECS-Fargate/Terraform)
@@ -49,9 +51,10 @@ REPO_ROOT="${REPO_ROOT:-.}"
 # Orden de despliegue de los proyectos base (los servicios van siempre al final).
 # Para añadir un proyecto nuevo a la plataforma, ponlo aquí en la posición que le toque
 # según sus dependencias (y en las opciones de "project" del workflow manual).
-ORDER=(VPC-module ALB-module ECS-cluster-module EC2-bastion-host-module ECR-module)
-# Proyecto que se planifica pero no se aplica automáticamente
-MANUAL_ONLY=EC2-bastion-host-module
+# Los proyectos que NO están aquí (bucket del state, OIDC y Bastion) se ignoran.
+ORDER=(VPC-module ALB-module ECS-cluster-module ECR-module)
+# Proyecto excluido del pipeline del que, aun así, se avisa si cambia
+BASTION=EC2-bastion-host-module
 
 # ---------------------------------------------------------------------------
 # 1. Leer la lista de archivos cambiados
@@ -69,6 +72,7 @@ if [[ $# -gt 0 ]]; then files=("$@"); else mapfile -t files; fi
 #   removed[<servicio>]  servicios cuyo directorio ya no existe
 declare -A changed=() removed=()
 all_services=false        # pasa a true si cambió el módulo común de servicios
+bastion_changed=false     # pasa a true si cambió el Bastion (solo para avisar)
 for f in "${files[@]}"; do
   # Ignora todo lo que no esté dentro de la plataforma (otros laboratorios del repositorio)
   [[ "$f" == "$TF_ROOT/"* ]] || continue
@@ -97,8 +101,9 @@ for f in "${files[@]}"; do
       fi ;;
     */manifests/*)
       # Un proyecto base: el primer componente de la ruta ("ALB-module/manifests/x.tf" -> "ALB-module").
-      # Solo se acepta si está en ORDER: así quedan fuera S3-tfstate-backend-module y GitHub-OIDC-module
+      # Solo se acepta si está en ORDER: así quedan fuera el bucket, OIDC y el Bastion
       project="${rel%%/*}"
+      [[ "$project" == "$BASTION" ]] && bastion_changed=true    # excluido, pero se avisa
       for p in "${ORDER[@]}"; do [[ "$p" == "$project" ]] && changed["$project"]=1; done ;;
   esac
 done
@@ -140,19 +145,16 @@ to_json() { # lista de proyectos -> [{"name":..,"dir":..}]
 # ---------------------------------------------------------------------------
 # 4. Construir las tres listas
 # ---------------------------------------------------------------------------
-# apply = la lista ordenada SIN el Bastion (solo se aplica a mano)
-apply_list=()
-for p in "${ordered[@]}"; do [[ -z "$p" || "$p" == "$MANUAL_ONLY" ]] || apply_list+=("$p"); done
 # Servicios borrados, ordenados (sed quita la línea vacía que aparece si no hay ninguno)
 mapfile -t removed_list < <(printf '%s\n' "${!removed[@]}" | sort | sed '/^$/d' || true)
 
 plan_json=$(to_json "${ordered[@]}")
-apply_json=$(to_json "${apply_list[@]}")
+# Todo lo que se planifica se puede aplicar (los proyectos que no se aplican ya quedaron fuera).
+# Se mantiene como output separado por si en el futuro algún proyecto fuera "solo plan".
+apply_json="$plan_json"
 removed_json=$(to_json "${removed_list[@]}")
 # true si la lista JSON tiene algún elemento ("[]" = vacía)
 bool() { [[ "$1" != "[]" ]] && echo true || echo false; }
-# ¿Cambió el Bastion? El workflow lo usa para avisar de que no se aplicará tras el merge
-bastion_changed=false; [[ -n "${changed[$MANUAL_ONLY]:-}" ]] && bastion_changed=true
 
 # ---------------------------------------------------------------------------
 # 5. Salida
@@ -170,6 +172,6 @@ if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
     echo "has_plan=$(bool "$plan_json")"           # ¿se ejecutan checks y plan?
     echo "has_apply=$(bool "$apply_json")"         # ¿se ejecuta apply?
     echo "has_removed=$(bool "$removed_json")"     # ¿hay que avisar de servicios borrados?
-    echo "bastion_changed=$bastion_changed"        # ¿hay que avisar del Bastion?
+    echo "bastion_changed=$bastion_changed"        # ¿hay que avisar de que cambió el Bastion (excluido)?
   } >> "$GITHUB_OUTPUT"
 fi

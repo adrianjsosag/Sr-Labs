@@ -27,7 +27,7 @@
 #
 # LO QUE ESTE WORKFLOW NUNCA APLICA
 #   - S3-tfstate-backend-module (bucket del state) y GitHub-OIDC-module (sus propios permisos): a mano.
-#   - EC2-bastion-host-module tras un merge: solo con el workflow manual o desde tu PC.
+#   - EC2-bastion-host-module: excluido por completo (ni plan ni apply). Se gestiona desde tu PC.
 #   - Imágenes Docker: se suben con ECR-module/push-image.sh desde tu PC, antes del merge.
 #
 # DOCUMENTACIÓN: .github/README.md (incluye este archivo explicado paso a paso)
@@ -57,7 +57,6 @@ on:
           - VPC-module
           - ALB-module
           - ECS-cluster-module
-          - EC2-bastion-host-module      # el Bastion solo se puede aplicar por esta vía
           - ECR-module
           - service                      # un servicio: su nombre va en service_name
       service_name:
@@ -116,7 +115,9 @@ jobs:
           SERVICE: ${{ inputs.service_name }}
         run: |
           if [[ "$EVENT" == "workflow_dispatch" ]]; then
-            # Manual: un único proyecto, el elegido en el formulario (aquí sí se permite el Bastion)
+            # Manual: un único proyecto, el elegido en el formulario
+            # el Bastion está excluido del pipeline (también si se lanza por la API)
+            [[ "$PROJECT" != "EC2-bastion-host-module" ]] || { echo "::error::El pipeline no gestiona EC2-bastion-host-module: aplícalo desde tu PC"; exit 1; }
             if [[ "$PROJECT" == "service" ]]; then
               # el nombre del servicio solo puede tener minúsculas, números y guiones (1-20)
               [[ "$SERVICE" =~ ^[a-z0-9-]{1,20}$ ]] || { echo "::error::service_name inválido: '$SERVICE'"; exit 1; }
@@ -148,7 +149,6 @@ jobs:
 
       - name: Avisos                   # anotaciones amarillas en el run; no hacen fallar el job
         env:
-          EVENT: ${{ github.event_name }}
           HAS_REMOVED: ${{ steps.changes.outputs.has_removed }}   # ¿se borró algún servicio?
           REMOVED: ${{ steps.changes.outputs.removed }}
           BASTION: ${{ steps.changes.outputs.bastion_changed }}   # ¿cambió el Bastion?
@@ -163,9 +163,9 @@ jobs:
           if [[ "$HAS_REMOVED" == "true" ]]; then
             echo "::warning::Se borraron directorios de servicios ($REMOVED). Sus recursos pueden seguir en AWS: restaura el directorio y ejecuta 'destroy' con el workflow manual antes de borrarlo."
           fi
-          # tras un merge, el Bastion no se aplica solo: se avisa
-          if [[ "$BASTION" == "true" && "$EVENT" == "push" ]]; then
-            echo "::warning::Cambió EC2-bastion-host-module: no se aplica automáticamente. Aplícalo desde tu PC o con el workflow manual."
+          # el Bastion está excluido del pipeline: si cambia, se avisa (en el PR y tras el merge)
+          if [[ "$BASTION" == "true" ]]; then
+            echo "::warning::Cambió EC2-bastion-host-module: el pipeline no lo gestiona (ni plan ni apply). Revísalo y aplícalo desde tu PC."
           fi
 
   checks:

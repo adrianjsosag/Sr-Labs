@@ -356,7 +356,7 @@ terraform plan -var remote_state_local_dir=/ruta/a/states-ficticios
 
 ## Cómo desplegarlo paso a paso
 
-> 🤖 **El pipeline no aplica el Bastion automáticamente:** sus provisioners se conectan por SSH desde quien aplica, y el `.pem` quedaría en el runner y se perdería. En un Pull Request solo se muestra su `plan`. Aplícalo a mano con estos pasos, o con el [workflow manual](../../../../.github/README.md#workflow-manual) si aceptas perder el `.pem` local (la llave sigue en el state).
+> 🤖 **El pipeline no gestiona el Bastion** ([GitHub Actions](../../../../.github/README.md)): no lo valida, no lo planifica y no lo aplica, ni siquiera con el workflow manual. Sus provisioners se conectan por SSH desde quien aplica y el `.pem` se escribe en ese equipo, así que se despliega **siempre a mano desde tu PC** con estos pasos. Si cambias sus archivos en un PR, el pipeline solo muestra un aviso.
 
 ### Requisitos previos
 

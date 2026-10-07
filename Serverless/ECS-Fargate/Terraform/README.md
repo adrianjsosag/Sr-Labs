@@ -699,7 +699,7 @@ flowchart LR
 | Proyecto | En el PR | Tras el merge |
 |---|---|---|
 | VPC, ALB, cluster, ECR y servicios | `validate` + `plan` | ✅ `apply` en orden, tras la aprobación |
-| [`EC2-bastion-host-module`](EC2-bastion-host-module/README.md) | `validate` + `plan` | ⚠️ Solo un aviso: aplícalo **desde tu PC** o con el [workflow manual](../../../.github/README.md#workflow-manual). Sus provisioners se conectan por SSH desde quien aplica y el `.pem` se escribe en ese equipo |
+| [`EC2-bastion-host-module`](EC2-bastion-host-module/README.md) | Ignorado (solo un aviso si cambia) | Ignorado: **siempre desde tu PC**. Sus provisioners se conectan por SSH desde quien aplica y el `.pem` se escribe en ese equipo |
 | [`S3-tfstate-backend-module`](S3-tfstate-backend-module/README.md) y [`GitHub-OIDC-module`](GitHub-OIDC-module/README.md) | Ignorados | Ignorados: **siempre a mano** (el pipeline no puede tocar su bucket ni sus permisos) |
 | Imágenes Docker del ECR | — | **No:** súbelas con `ECR-module/push-image.sh` desde tu PC **antes** del merge. Si un servicio usa un `image_tag` que no existe, su `plan` falla |
 
@@ -709,7 +709,7 @@ flowchart LR
 |---|---|
 | Ponerlo en marcha la primera vez (OIDC, environment, variables, protección de `main`) | [Puesta en marcha](../../../.github/README.md#puesta-en-marcha-una-sola-vez) |
 | Desplegar un cambio (rama → PR → plan → merge → aprobación) | [Flujo diario](../../../.github/README.md#flujo-diario) |
-| Aplicar el Bastion, destruir un servicio o re-desplegar a mano | [Workflow manual](../../../.github/README.md#workflow-manual) |
+| Destruir un servicio o re-desplegar un proyecto a mano | [Workflow manual](../../../.github/README.md#workflow-manual) |
 | Entender o modificar el workflow | [Los jobs en detalle](../../../.github/README.md#los-jobs-en-detalle) y [Mantenimiento](../../../.github/README.md#mantenimiento) |
 
 ---

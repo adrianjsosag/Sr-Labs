@@ -8,12 +8,12 @@ Este documento sirve para **usarlo** (puesta en marcha, flujo diario, workflow m
 
 | 🧭 Ficha rápida | |
 |---|---|
-| **Qué despliega** | Los proyectos Terraform de la plataforma: VPC, ALB, cluster ECS, ECR y servicios (el Bastion, solo con el workflow manual) |
+| **Qué despliega** | Los proyectos Terraform de la plataforma: VPC, ALB, cluster ECS, ECR y servicios |
 | **Cuándo se ejecuta** | En cada Pull Request a `main`, en cada merge a `main` y a mano (*Run workflow*) |
 | **Credenciales de AWS** | **OIDC**, sin claves guardadas: rol de **plan** (solo lectura) y rol de **apply** (solo con aprobación). Los crea [`GitHub-OIDC-module`](../Serverless/ECS-Fargate/Terraform/GitHub-OIDC-module/README.md) |
 | **Aprobación** | Environment de GitHub **`production`**, con revisores obligatorios |
 | **Archivos** | [`workflows/terraform.yml`](workflows/terraform.yml) y [`scripts/terraform-changed-projects.sh`](scripts/terraform-changed-projects.sh) |
-| **Nunca aplica** | El bucket del state (`S3-tfstate-backend-module`) ni sus propios permisos (`GitHub-OIDC-module`) |
+| **Nunca toca** | El bucket del state (`S3-tfstate-backend-module`), sus propios permisos (`GitHub-OIDC-module`) ni el Bastion (`EC2-bastion-host-module`): se gestionan desde tu PC |
 
 > 🗺️ Vista general de la plataforma: [README de Terraform](../Serverless/ECS-Fargate/Terraform/README.md).
 
@@ -183,7 +183,7 @@ Los cambios en otros laboratorios del repositorio no lo activan.
 3. **Avisos** (anotaciones `::warning::`):
    - faltan las variables del repositorio, así que se omiten `plan` y `apply`;
    - se borró el directorio de un servicio (sus recursos pueden seguir en AWS);
-   - en un merge cambió el Bastion, que no se aplica automáticamente.
+   - cambió el Bastion, que el pipeline no gestiona: hay que revisarlo y aplicarlo desde tu PC (en PR y en merge).
 
 ### `checks` – fmt + validate
 
@@ -282,7 +282,6 @@ on:
           - VPC-module
           - ALB-module
           - ECS-cluster-module
-          - EC2-bastion-host-module      # el Bastion solo se puede aplicar por esta vía
           - ECR-module
           - service                      # un servicio: su nombre va en service_name
       service_name:
@@ -353,7 +352,9 @@ jobs:
           SERVICE: ${{ inputs.service_name }}
         run: |
           if [[ "$EVENT" == "workflow_dispatch" ]]; then
-            # Manual: un único proyecto, el elegido en el formulario (aquí sí se permite el Bastion)
+            # Manual: un único proyecto, el elegido en el formulario
+            # el Bastion está excluido del pipeline (también si se lanza por la API)
+            [[ "$PROJECT" != "EC2-bastion-host-module" ]] || { echo "::error::El pipeline no gestiona EC2-bastion-host-module: aplícalo desde tu PC"; exit 1; }
             if [[ "$PROJECT" == "service" ]]; then
               # el nombre del servicio solo puede tener minúsculas, números y guiones (1-20)
               [[ "$SERVICE" =~ ^[a-z0-9-]{1,20}$ ]] || { echo "::error::service_name inválido: '$SERVICE'"; exit 1; }
@@ -385,7 +386,6 @@ jobs:
 
       - name: Avisos                   # anotaciones amarillas en el run; no hacen fallar el job
         env:
-          EVENT: ${{ github.event_name }}
           HAS_REMOVED: ${{ steps.changes.outputs.has_removed }}   # ¿se borró algún servicio?
           REMOVED: ${{ steps.changes.outputs.removed }}
           BASTION: ${{ steps.changes.outputs.bastion_changed }}   # ¿cambió el Bastion?
@@ -400,9 +400,9 @@ jobs:
           if [[ "$HAS_REMOVED" == "true" ]]; then
             echo "::warning::Se borraron directorios de servicios ($REMOVED). Sus recursos pueden seguir en AWS: restaura el directorio y ejecuta 'destroy' con el workflow manual antes de borrarlo."
           fi
-          # tras un merge, el Bastion no se aplica solo: se avisa
-          if [[ "$BASTION" == "true" && "$EVENT" == "push" ]]; then
-            echo "::warning::Cambió EC2-bastion-host-module: no se aplica automáticamente. Aplícalo desde tu PC o con el workflow manual."
+          # el Bastion está excluido del pipeline: si cambia, se avisa (en el PR y tras el merge)
+          if [[ "$BASTION" == "true" ]]; then
+            echo "::warning::Cambió EC2-bastion-host-module: el pipeline no lo gestiona (ni plan ni apply). Revísalo y aplícalo desde tu PC."
           fi
 ```
 
@@ -671,10 +671,9 @@ Solo en un **merge a `main`** o en el **workflow manual** con `apply` o `destroy
 |---|---|
 | Qué archivos cuentan | Solo `.tf`, `.tfvars` y `.terraform.lock.hcl` dentro de `Serverless/ECS-Fargate/Terraform/<proyecto>/manifests/` |
 | Módulo común de servicios | Un cambio en `ECS-services-module/modules/**` marca **todos** los servicios existentes |
-| Proyectos ignorados | `S3-tfstate-backend-module` y `GitHub-OIDC-module`: siempre a mano |
-| Bastion | `EC2-bastion-host-module` va en `plan` pero **no** en `apply` |
+| Proyectos ignorados | `S3-tfstate-backend-module`, `GitHub-OIDC-module` y `EC2-bastion-host-module`: no entran en ninguna lista, siempre a mano. Si cambia el Bastion, `bastion_changed=true` para avisar |
 | Servicios borrados | Si cambió un archivo de `services/<x>/manifests/` y ese directorio ya no existe, va a `removed` (aviso) |
-| Orden | `VPC-module` → `ALB-module` → `ECS-cluster-module` → `EC2-bastion-host-module` → `ECR-module` → servicios (alfabético) |
+| Orden | `VPC-module` → `ALB-module` → `ECS-cluster-module` → `ECR-module` → servicios (alfabético) |
 
 **Ejemplo:**
 
@@ -812,14 +811,13 @@ Si borras el directorio primero, el pipeline solo avisa y los recursos se quedan
 
 | Entrada | Valores |
 |---|---|
-| `project` | `VPC-module`, `ALB-module`, `ECS-cluster-module`, `EC2-bastion-host-module`, `ECR-module` o `service` |
+| `project` | `VPC-module`, `ALB-module`, `ECS-cluster-module`, `ECR-module` o `service` (el Bastion no está: se gestiona desde tu PC) |
 | `service_name` | Solo si `project = service`: el nombre del directorio, por ejemplo `nginx-1` |
 | `action` | `plan` (solo mirar), `apply` o `destroy` |
 
 Siempre muestra primero el plan (con `-destroy` si la acción es `destroy`). Para `apply` y `destroy` espera la aprobación del environment `production`.
 
 **Cuándo usarlo:**
-- **Bastion:** es la única forma de aplicarlo desde GitHub. Ten en cuenta que su `.pem` se escribe en el runner y se pierde (la llave sigue en el state), y que el provisioner SSH necesita que el runner pueda llegar al puerto 22.
 - **Destruir** un servicio o un módulo.
 - **Volver a aplicar** un proyecto sin cambios de código, por ejemplo para corregir un cambio hecho a mano en la consola (*drift*).
 
@@ -875,7 +873,7 @@ shellcheck .github/scripts/terraform-changed-projects.sh
 # Casos del script con listas de archivos ficticias (no tocan nada)
 X=Serverless/ECS-Fargate/Terraform
 printf '%s\n' "$X/ECS-services-module/modules/ecs-service/main.tf" | .github/scripts/terraform-changed-projects.sh   # → todos los servicios
-printf '%s\n' "$X/EC2-bastion-host-module/manifests/x.tf"          | .github/scripts/terraform-changed-projects.sh   # → plan sí, apply no
+printf '%s\n' "$X/EC2-bastion-host-module/manifests/x.tf"          | .github/scripts/terraform-changed-projects.sh   # → nada (excluido), bastion_changed
 printf '%s\n' "$X/README.md"                                       | .github/scripts/terraform-changed-projects.sh   # → nada
 ```
 
@@ -893,7 +891,7 @@ printf '%s\n' "$X/README.md"                                       | .github/scr
 | Limitación | Detalle | Alternativa |
 |---|---|---|
 | **No sube imágenes Docker** | `push-image.sh` necesita Docker y se ejecuta desde tu PC | Subir la imagen antes del merge. A futuro: un pipeline de *build* por aplicación |
-| **El Bastion no se aplica en el merge** | Sus provisioners se conectan por SSH desde quien aplica y el `.pem` se escribe en ese equipo | Aplicarlo desde tu PC o con el workflow manual. Mejor aún: SSM Session Manager en lugar de SSH |
+| **El Bastion está excluido** | El pipeline no lo valida, no lo planifica y no lo aplica: sus provisioners se conectan por SSH desde quien aplica y el `.pem` se escribe en ese equipo | Gestionarlo desde tu PC ([README del Bastion](../Serverless/ECS-Fargate/Terraform/EC2-bastion-host-module/README.md)). Mejor aún: SSM Session Manager en lugar de SSH |
 | **Se vuelve a planificar antes del apply** | El `apply` no usa el plan del job `plan` (el que viste), sino uno nuevo calculado justo antes. Así cada proyecto ve los outputs del anterior, pero si alguien cambia AWS entre medias, el apply incluirá esos cambios | Revisar el resumen del job `apply`. A futuro: aplicar el plan guardado cuando solo cambia un proyecto |
 | **Un solo entorno** | Todo despliega en `stag`, en una cuenta | Al crear más entornos: un environment de GitHub y un par de roles por entorno |
 | **Sin escáneres de seguridad** | Solo `fmt` y `validate` | Ver [Añadir escáneres](#añadir-escáneres-de-seguridad) |
@@ -914,5 +912,5 @@ printf '%s\n' "$X/README.md"                                       | .github/scr
 | `NoSuchBucket` en `terraform init` | No existe el bucket del state | Aplica `S3-tfstate-backend-module` |
 | El smoke test falla por timeout | Las tareas no pasan el health check: imagen, puerto o ruta de salud incorrectos | Eventos del servicio en ECS y logs en CloudWatch (ver [servicios](../Serverless/ECS-Fargate/Terraform/ECS-services-module/README.md#problemas-frecuentes)) |
 | Un PR no dispara el workflow | No toca `Serverless/ECS-Fargate/Terraform/**` ni los archivos del pipeline, o no va contra `main` | Es lo esperado |
-| `detect` no encuentra el proyecto que cambié | Cambiaste un archivo que no cuenta (README, script) o un proyecto ignorado (bucket, OIDC) | Ver las [reglas de detección](#detección-de-proyectos) |
+| `detect` no encuentra el proyecto que cambié | Cambiaste un archivo que no cuenta (README, script) o un proyecto ignorado (bucket, OIDC, Bastion) | Ver las [reglas de detección](#detección-de-proyectos) |
 | En Windows, `git status` muestra el script como modificado (`old mode 100755 / new mode 100644`) | Git para Windows no ve el permiso de ejecución en esa unidad | **No hagas commit** de ese cambio. Para ocultarlo: `git config core.fileMode false` en el repositorio |
