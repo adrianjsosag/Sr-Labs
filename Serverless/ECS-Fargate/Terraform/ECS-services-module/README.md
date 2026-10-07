@@ -418,6 +418,8 @@ Si el bucket o los otros proyectos aún no existen, se pueden usar **states fict
 
 ## Cómo desplegarlo paso a paso
 
+> 🤖 **Con el pipeline** ([GitHub Actions](../README.md#pipeline-cicd-github-actions)): haz el cambio en una rama, abre un Pull Request a `main`, revisa el `plan` que se comenta en el PR, haz merge y aprueba el despliegue. El pipeline aplica este módulo por ti. Los pasos de abajo son para desplegarlo **a mano**.
+
 ### Requisitos previos
 
 1. **Aplicados, en este orden:** `S3-tfstate-backend-module` (bucket del state), `VPC-module` (con NAT Gateway), `ALB-module`, `ECS-cluster-module` y `ECR-module`.

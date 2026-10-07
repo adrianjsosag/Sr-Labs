@@ -234,6 +234,8 @@ terraform plan        # solo lee la cuenta de AWS; no crea nada
 
 ## Cómo desplegarlo paso a paso
 
+> 🔐 **Siempre a mano:** el pipeline no aplica este módulo, porque crea el bucket que el propio pipeline necesita.
+
 ### Requisitos previos
 
 1. **Credenciales de AWS** (perfil `default` o `AWS_PROFILE`) con permisos para crear buckets S3. Compruébalas con `aws sts get-caller-identity`.
