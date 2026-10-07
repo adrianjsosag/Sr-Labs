@@ -29,7 +29,7 @@
 #
 # REQUISITOS: los mismos que el pipeline de despliegue (terraform.yml): variables del repositorio
 #   AWS_REGION y AWS_PLAN_ROLE_ARN. El rol de plan ya confía en la rama main (sub ref:refs/heads/main).
-# DOCUMENTACIÓN: .github/README.md#detección-de-drift
+# DOCUMENTACIÓN: .github/workflows/README-check-terraform-drift.md
 # =============================================================================
 name: "Check Terraform drift"          # nombre que aparece en la pestaña Actions
 
@@ -91,7 +91,7 @@ jobs:
         run: |
           # sin el rol de plan no hay credenciales de AWS: la revisión no se puede hacer
           if [[ -z "$PLAN_ROLE" ]]; then
-            msg="Faltan las variables del repositorio AWS_PLAN_ROLE_ARN / AWS_REGION: no se puede revisar el drift. Ver la puesta en marcha del pipeline en .github/README.md."
+            msg="Faltan las variables del repositorio AWS_PLAN_ROLE_ARN / AWS_REGION: no se puede revisar el drift. Ver la puesta en marcha en .github/workflows/README-terraform.md."
             echo "::warning::$msg"; echo "> ⚠️ $msg" >> "$GITHUB_STEP_SUMMARY"
           fi
 

@@ -181,7 +181,7 @@ Este README explica la **plataforma completa**: cómo encajan los módulos y en 
 | 13 | 💰 Costos | Qué cobra AWS y cómo no pagar de más |
 | 14 | 🛠️ Problemas frecuentes | Tabla de síntoma, causa probable y solución |
 
-> 🤖 **El pipeline de GitHub Actions** tiene su propio documento: [`.github/README.md`](../../../.github/README.md).
+> 🤖 **El pipeline de GitHub Actions** tiene su propia documentación: [`README-terraform.md`](../../../.github/workflows/README-terraform.md) (pipeline de despliegue) y [`README-check-terraform-drift.md`](../../../.github/workflows/README-check-terraform-drift.md) (detección de drift). Índice: [`.github/README.md`](../../../.github/README.md).
 
 > 💡 **Para desplegar por primera vez**, empieza siempre por el [bucket del state](S3-tfstate-backend-module/README.md) y sigue la [Guía de despliegue paso a paso](#guía-de-despliegue-paso-a-paso) de este README. Ve a los README de cada módulo cuando quieras entender o cambiar algo en detalle.
 
@@ -668,7 +668,7 @@ Todos los campos disponibles y la tabla de prioridades en uso: [README de servic
 
 El workflow [`.github/workflows/terraform.yml`](../../../.github/workflows/terraform.yml) valida y despliega la plataforma desde GitHub. Aplica el modelo **GitOps**: los cambios entran por un **Pull Request**, se revisan con su `plan` y se aplican tras una **aprobación**, sin ejecutar `terraform apply` desde tu PC.
 
-> 📘 **Documentación completa del pipeline:** [`.github/README.md`](../../../.github/README.md). Incluye la puesta en marcha, el flujo diario, el workflow manual, cómo funciona cada job, los permisos, el mantenimiento y los problemas frecuentes.
+> 📘 **Documentación completa del pipeline:** [`.github/workflows/README-terraform.md`](../../../.github/workflows/README-terraform.md). Incluye la puesta en marcha, el flujo diario, el workflow manual, cómo funciona cada job, los permisos, el mantenimiento y los problemas frecuentes.
 
 ### Cómo funciona el proceso
 
@@ -707,11 +707,11 @@ flowchart LR
 
 | Quiero… | Dónde |
 |---|---|
-| Ponerlo en marcha la primera vez (OIDC, environment, variables, protección de `main`) | [Puesta en marcha](../../../.github/README.md#puesta-en-marcha-una-sola-vez) |
-| Desplegar un cambio (rama → PR → plan → merge → aprobación) | [Flujo diario](../../../.github/README.md#flujo-diario) |
-| Destruir un servicio o re-desplegar un proyecto a mano | [Workflow manual](../../../.github/README.md#workflow-manual) |
-| Comprobar si AWS coincide con el código (drift) | [Detección de drift](../../../.github/README.md#detección-de-drift) |
-| Entender o modificar el workflow | [Los jobs en detalle](../../../.github/README.md#los-jobs-en-detalle) y [Mantenimiento](../../../.github/README.md#mantenimiento) |
+| Ponerlo en marcha la primera vez (OIDC, environment, variables, protección de `main`) | [Puesta en marcha](../../../.github/workflows/README-terraform.md#puesta-en-marcha-una-sola-vez) |
+| Desplegar un cambio (rama → PR → plan → merge → aprobación) | [Flujo diario](../../../.github/workflows/README-terraform.md#flujo-diario) |
+| Destruir un servicio o re-desplegar un proyecto a mano | [Workflow manual](../../../.github/workflows/README-terraform.md#workflow-manual) |
+| Comprobar si AWS coincide con el código (drift) | [Detección de drift](../../../.github/workflows/README-check-terraform-drift.md) |
+| Entender o modificar el workflow | [Los jobs en detalle](../../../.github/workflows/README-terraform.md#los-jobs-en-detalle) y [Mantenimiento](../../../.github/workflows/README-terraform.md#mantenimiento) |
 
 ---
 
@@ -981,7 +981,7 @@ Las 6 mejoras con **mayor impacto en seguridad** para empezar:
 | **Postura y cumplimiento continuo** | No se mide el cumplimiento | **AWS Security Hub** (estándares CIS y *AWS Foundational Security Best Practices*) + **AWS Config** con reglas administradas. Revisión periódica de hallazgos | `security-baseline` | 🟠 | M | CIS, WA-SEC 4 |
 | **Logs de red y de acceso** | Sin VPC Flow Logs ni logs de acceso del ALB | VPC Flow Logs (`enable_flow_log` del módulo VPC) y `access_logs` del ALB a S3 cifrado, con retención según política | `VPC-module`, `ALB-module` | 🟠 | S | CIS 3.x, WA-SEC 4 |
 | **Observabilidad de aplicaciones** | Container Insights `disabled`, sin alarmas ni dashboards. Retención de logs fija en 7 días | Container Insights, **alarmas CloudWatch + SNS** (5xx del ALB, `UnHealthyHostCount`, CPU/memoria, tareas detenidas), dashboard por servicio, trazas con **X-Ray/OpenTelemetry**, retención configurable | `ECS-cluster-module`, `ECS-services-module` | 🟠 | M | WA-OPS, REL |
-| ✅ **Detección de drift** *(implementado)* | **Hecho:** workflow manual [`check-terraform-drift.yml`](../../../.github/workflows/check-terraform-drift.yml): `terraform plan -detailed-exitcode` de solo lectura en cada proyecto del pipeline, tabla de estados (sin drift, drift, no desplegado, falta una dependencia, error) e **issue** que se abre o actualiza si hay diferencias y se cierra solo. Ver [Detección de drift](../../../.github/README.md#detección-de-drift) | **Pendiente:** si se quiere una alerta sin intervención, ejecutarlo de forma programada (`schedule`); revisar también el bucket del state, OIDC y el Bastion | `.github/workflows/` | 🟠 | S | WA-OPS, SSDF |
+| ✅ **Detección de drift** *(implementado)* | **Hecho:** workflow manual [`check-terraform-drift.yml`](../../../.github/workflows/check-terraform-drift.yml): `terraform plan -detailed-exitcode` de solo lectura en cada proyecto del pipeline, tabla de estados (sin drift, drift, no desplegado, falta una dependencia, error) e **issue** que se abre o actualiza si hay diferencias y se cierra solo. Ver [Detección de drift](../../../.github/workflows/README-check-terraform-drift.md) | **Pendiente:** si se quiere una alerta sin intervención, ejecutarlo de forma programada (`schedule`); revisar también el bucket del state, OIDC y el Bastion | `.github/workflows/` | 🟠 | S | WA-OPS, SSDF |
 | **Respuesta a incidentes** | No hay procedimientos | Runbooks (credencial filtrada, imagen vulnerable, tarea comprometida: aislar SG, *snapshot*, rotar secretos) y automatizaciones con EventBridge/SSM Automation | Documentación + `security-baseline` | 🟢 | M | WA-SEC 10, SSDF RV |
 | **FinOps** | Sin presupuestos ni visibilidad del costo de cada cambio | **AWS Budgets** con alertas, **Infracost** en el PR, apagado programado del laboratorio (servicios a 0 tareas fuera de horario), Fargate Spot y **Graviton** (`runtime_platform` ARM64) | Pipeline + servicios | 🟢 | S | WA-COST |
 
@@ -1020,7 +1020,7 @@ flowchart LR
 | `Backend configuration changed` / `Backend initialization required` al hacer `terraform init` | Ese `manifests/` se inicializó antes con otro backend (por ejemplo, con el state local) | `terraform init -migrate-state` para copiar el state al bucket, o `-reconfigure` si no hay nada que copiar. Ver [Migrar states locales](S3-tfstate-backend-module/README.md#migrar-states-locales-al-bucket) |
 | `Error acquiring the state lock` | Otro `plan`/`apply` está usando ese state, o uno anterior se interrumpió | Espera. Si nadie lo usa: `terraform force-unlock <LOCK_ID>`, con el ID que muestra el error |
 | Pipeline: `Not authorized to perform sts:AssumeRoleWithWebIdentity` | El repositorio, la rama o el environment no coinciden con los `sub` aceptados por los roles | Revisa `terraform output github_oidc_subjects` en [`GitHub-OIDC-module`](GitHub-OIDC-module/README.md#problemas-frecuentes) |
-| Pipeline: "se omiten plan y apply" | Faltan las variables del repositorio `AWS_PLAN_ROLE_ARN`, `AWS_APPLY_ROLE_ARN` o `AWS_REGION` | Ver [Puesta en marcha](../../../.github/README.md#puesta-en-marcha-una-sola-vez) |
+| Pipeline: "se omiten plan y apply" | Faltan las variables del repositorio `AWS_PLAN_ROLE_ARN`, `AWS_APPLY_ROLE_ARN` o `AWS_REGION` | Ver [Puesta en marcha](../../../.github/workflows/README-terraform.md#puesta-en-marcha-una-sola-vez) |
 | Pipeline: el apply se queda en *Waiting* | Espera la aprobación del environment `production` | *Review deployments → Approve* en la página del run |
 | `Unsupported attribute "…"` al leer un remote state | El state del otro módulo es de una versión anterior, sin ese output | Ejecuta `terraform apply` en el otro módulo para actualizar sus outputs |
 | Los nombres no coinciden entre módulos | `environment`, `business_divsion` o `aws_region` distintos en algún `terraform.tfvars` | Usa los mismos valores en todos |
