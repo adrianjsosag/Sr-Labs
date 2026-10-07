@@ -27,16 +27,17 @@ Este documento sirve para **usarlo** (puesta en marcha, flujo diario, workflow m
 4. 📁 [Archivos del pipeline](#archivos-del-pipeline)
 5. 🎯 [Disparadores](#disparadores)
 6. 🔍 [Los jobs en detalle](#los-jobs-en-detalle)
-7. 🧮 [Detección de proyectos](#detección-de-proyectos)
-8. 🔒 [Seguridad y permisos](#seguridad-y-permisos)
-9. ⚙️ [Configuración](#configuración)
-10. 🚀 [Puesta en marcha (una sola vez)](#puesta-en-marcha-una-sola-vez)
-11. 📲 [Flujo diario](#flujo-diario)
-12. 🖐️ [Workflow manual](#workflow-manual)
-13. 🛠️ [Mantenimiento](#mantenimiento)
-14. 🧪 [Cómo probar cambios del pipeline](#cómo-probar-cambios-del-pipeline)
-15. ⚠️ [Limitaciones conocidas](#limitaciones-conocidas)
-16. 🧰 [Problemas frecuentes](#problemas-frecuentes)
+7. 📖 [El workflow comentado, paso a paso](#el-workflow-comentado-paso-a-paso)
+8. 🧮 [Detección de proyectos](#detección-de-proyectos)
+9. 🔒 [Seguridad y permisos](#seguridad-y-permisos)
+10. ⚙️ [Configuración](#configuración)
+11. 🚀 [Puesta en marcha (una sola vez)](#puesta-en-marcha-una-sola-vez)
+12. 📲 [Flujo diario](#flujo-diario)
+13. 🖐️ [Workflow manual](#workflow-manual)
+14. 🛠️ [Mantenimiento](#mantenimiento)
+15. 🧪 [Cómo probar cambios del pipeline](#cómo-probar-cambios-del-pipeline)
+16. ⚠️ [Limitaciones conocidas](#limitaciones-conocidas)
+17. 🧰 [Problemas frecuentes](#problemas-frecuentes)
 
 ---
 
@@ -163,6 +164,8 @@ Los cambios en otros laboratorios del repositorio no lo activan.
 
 ## Los jobs en detalle
 
+> 📖 Para ver el código de cada job con comentarios línea a línea, ve a [El workflow comentado, paso a paso](#el-workflow-comentado-paso-a-paso).
+
 ### `detect` – Detectar proyectos
 
 | | |
@@ -240,6 +243,417 @@ cancel-in-progress: ${{ es un pull_request }}
 
 - **PR:** un push nuevo **cancela** la ejecución anterior del mismo PR (solo hacen `plan`).
 - **Merge y manual:** comparten el grupo `deploy`. Se ejecutan **de uno en uno** y **nunca se cancela** un `apply` en curso; el siguiente espera.
+
+---
+
+## El workflow comentado, paso a paso
+
+Esta sección recorre [`workflows/terraform.yml`](workflows/terraform.yml) **de arriba abajo**, en bloques, con comentarios en español que explican qué hace cada línea y por qué. El código es el mismo que el del archivo; solo se añaden los comentarios (`#` en YAML y bash, `//` en JavaScript).
+
+> ℹ️ El archivo real manda. Si cambias el workflow, actualiza también esta sección.
+
+### 1. Nombre y disparadores
+
+Cuándo se ejecuta el workflow. El filtro `paths` hace que **solo** reaccione a cambios de la plataforma Terraform o del propio pipeline.
+
+```yaml
+name: "Terraform"                      # nombre que aparece en la pestaña Actions
+
+on:
+  pull_request:                        # 1) al abrir o actualizar un Pull Request...
+    branches: [main]                   #    ...que va hacia main
+    paths:                             #    ...y solo si toca alguno de estos archivos
+      - "Serverless/ECS-Fargate/Terraform/**"
+      - ".github/workflows/terraform.yml"
+      - ".github/scripts/terraform-changed-projects.sh"
+  push:                                # 2) al hacer merge (push) a main, con el mismo filtro
+    branches: [main]
+    paths:
+      - "Serverless/ECS-Fargate/Terraform/**"
+      - ".github/workflows/terraform.yml"
+      - ".github/scripts/terraform-changed-projects.sh"
+  workflow_dispatch:                   # 3) a mano: Actions → Terraform → Run workflow
+    inputs:                            #    formulario que se muestra al lanzarlo
+      project:                         #    qué proyecto tocar (lista desplegable)
+        description: "Proyecto"
+        type: choice
+        required: true
+        options:
+          - VPC-module
+          - ALB-module
+          - ECS-cluster-module
+          - EC2-bastion-host-module      # el Bastion solo se puede aplicar por esta vía
+          - ECR-module
+          - service                      # un servicio: su nombre va en service_name
+      service_name:
+        description: "Nombre del servicio (solo si proyecto = service), p. ej. nginx-1"
+        type: string
+        required: false
+        default: ""
+      action:                          #    qué hacer con ese proyecto
+        description: "Acción"
+        type: choice
+        required: true
+        default: plan                    # por defecto solo mira, no cambia nada
+        options:
+          - plan
+          - apply
+          - destroy
+```
+
+### 2. Permisos, concurrencia y variables comunes
+
+Valores que afectan a **todos** los jobs.
+
+```yaml
+permissions:                           # permisos del token de GitHub para TODOS los jobs...
+  contents: read                       # ...solo leer el código. Cada job pide más si lo necesita
+
+# Grupo de concurrencia:
+#  - en un PR, el grupo es "terraform-pr-<número>" y un push nuevo cancela la ejecución anterior;
+#  - en merge y manual, el grupo es "terraform-deploy": van de uno en uno y nunca se cancelan.
+concurrency:
+  group: terraform-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'deploy' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:                                   # variables de entorno disponibles en todos los jobs
+  TF_VERSION: "1.16.5"                 # versión de Terraform que se instala
+  TF_ROOT: Serverless/ECS-Fargate/Terraform   # carpeta raíz de los proyectos
+  TF_IN_AUTOMATION: "true"             # salida de Terraform sin sugerencias interactivas
+  TF_INPUT: "false"                    # Terraform nunca pregunta nada: falla en vez de esperar
+```
+
+### 3. Job `detect`: qué proyectos cambiaron
+
+Decide **qué proyectos** hay que validar, planificar y aplicar, y se lo pasa a los demás jobs como `outputs`. No usa AWS.
+
+```yaml
+jobs:
+  detect:
+    name: Detectar proyectos
+    runs-on: ubuntu-latest             # máquina Ubuntu temporal, creada para este job
+    outputs:                           # lo que este job pasa a los siguientes (needs.detect.outputs.*)
+      plan: ${{ steps.changes.outputs.plan }}            # proyectos a planificar (JSON)
+      apply: ${{ steps.changes.outputs.apply }}          # proyectos que se pueden aplicar (JSON)
+      has_plan: ${{ steps.changes.outputs.has_plan }}    # "true" si hay algo que planificar
+      has_apply: ${{ steps.changes.outputs.has_apply }}  # "true" si hay algo que aplicar
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0               # descarga TODA la historia: hace falta para el git diff
+          persist-credentials: false   # no deja el token de GitHub guardado en .git
+
+      - name: Proyectos afectados
+        id: changes                    # id para leer sus outputs: steps.changes.outputs.*
+        env:                           # los datos del evento entran por env (evita inyección de comandos)
+          EVENT: ${{ github.event_name }}                     # pull_request | push | workflow_dispatch
+          PR_BASE: ${{ github.event.pull_request.base.sha }}  # commit base del PR
+          PUSH_BEFORE: ${{ github.event.before }}             # commit de main antes del merge
+          PROJECT: ${{ inputs.project }}                      # entradas del workflow manual
+          SERVICE: ${{ inputs.service_name }}
+        run: |
+          if [[ "$EVENT" == "workflow_dispatch" ]]; then
+            # Manual: un único proyecto, el elegido en el formulario (aquí sí se permite el Bastion)
+            if [[ "$PROJECT" == "service" ]]; then
+              # el nombre del servicio solo puede tener minúsculas, números y guiones (1-20)
+              [[ "$SERVICE" =~ ^[a-z0-9-]{1,20}$ ]] || { echo "::error::service_name inválido: '$SERVICE'"; exit 1; }
+              rel="ECS-services-module/services/$SERVICE"
+            else
+              rel="$PROJECT"
+            fi
+            # el proyecto debe existir en el repositorio
+            [[ -d "$TF_ROOT/$rel/manifests" ]] || { echo "::error::No existe $TF_ROOT/$rel/manifests"; exit 1; }
+            # lista JSON con un solo proyecto: [{"name":"ALB-module","dir":".../ALB-module/manifests"}]
+            json="[{\"name\":\"${rel##*/}\",\"dir\":\"$TF_ROOT/$rel/manifests\"}]"
+            # outputs del step (GITHUB_OUTPUT) y copia en changes.json para el resumen
+            { echo "plan=$json"; echo "apply=$json"; echo "has_plan=true"; echo "has_apply=true"; } >> "$GITHUB_OUTPUT"
+            echo "{\"plan\":$json,\"apply\":$json,\"removed\":[]}" | tee changes.json
+          else
+            # PR: compara con la base del PR. Push: con el commit anterior de main
+            base="$PR_BASE"
+            [[ "$EVENT" == "push" ]] && base="$PUSH_BEFORE"
+            # primer push de una rama (before = 000…): compara con el árbol vacío
+            if [[ -z "$base" || "$base" =~ ^0+$ ]]; then base=$(git hash-object -t tree /dev/null); fi
+            # archivos cambiados → script de detección → outputs (GITHUB_OUTPUT) y changes.json
+            git diff --name-only "$base" "$GITHUB_SHA" | .github/scripts/terraform-changed-projects.sh | tee changes.json
+          fi
+          # muestra la lista en el resumen del job (pestaña Summary del run)
+          {
+            echo "### Proyectos Terraform afectados"
+            echo '```json'; cat changes.json; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Avisos                   # anotaciones amarillas en el run; no hacen fallar el job
+        env:
+          EVENT: ${{ github.event_name }}
+          HAS_REMOVED: ${{ steps.changes.outputs.has_removed }}   # ¿se borró algún servicio?
+          REMOVED: ${{ steps.changes.outputs.removed }}
+          BASTION: ${{ steps.changes.outputs.bastion_changed }}   # ¿cambió el Bastion?
+          PLAN_ROLE: ${{ vars.AWS_PLAN_ROLE_ARN }}                # variable del repositorio
+        run: |
+          # sin variables del repositorio no hay credenciales de AWS: plan y apply se saltarán
+          if [[ -z "$PLAN_ROLE" ]]; then
+            msg="Faltan las variables del repositorio AWS_PLAN_ROLE_ARN / AWS_APPLY_ROLE_ARN / AWS_REGION: se omiten plan y apply. Ver la puesta en marcha del pipeline en el README."
+            echo "::warning::$msg"; echo "> ⚠️ $msg" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          # un directorio de servicio borrado no destruye sus recursos en AWS
+          if [[ "$HAS_REMOVED" == "true" ]]; then
+            echo "::warning::Se borraron directorios de servicios ($REMOVED). Sus recursos pueden seguir en AWS: restaura el directorio y ejecuta 'destroy' con el workflow manual antes de borrarlo."
+          fi
+          # tras un merge, el Bastion no se aplica solo: se avisa
+          if [[ "$BASTION" == "true" && "$EVENT" == "push" ]]; then
+            echo "::warning::Cambió EC2-bastion-host-module: no se aplica automáticamente. Aplícalo desde tu PC o con el workflow manual."
+          fi
+```
+
+### 4. Job `checks`: formato y validación (sin AWS)
+
+Comprueba que el código está bien formateado y es válido. No necesita credenciales ni el bucket del state.
+
+```yaml
+  checks:
+    name: fmt + validate
+    needs: detect                      # espera a detect para conocer la lista de proyectos
+    if: needs.detect.outputs.has_plan == 'true'   # solo si cambió algún proyecto
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}   # instala exactamente la 1.16.5
+          terraform_wrapper: false     # sin wrapper: los códigos de salida de terraform llegan tal cual
+      - name: terraform fmt
+        # falla si algún .tf no está formateado; -diff muestra qué habría que cambiar
+        run: terraform fmt -check -recursive -diff "$TF_ROOT"
+      - name: terraform validate (sin backend)
+        env:
+          PROJECTS: ${{ needs.detect.outputs.plan }}   # JSON con los proyectos cambiados
+        run: |
+          # jq extrae el "dir" de cada proyecto de la lista
+          for dir in $(jq -r '.[].dir' <<<"$PROJECTS"); do
+            echo "::group::validate $dir"               # agrupa el log (plegable en GitHub)
+            # -backend=false: descarga providers y módulos sin conectar con el bucket S3
+            terraform -chdir="$dir" init -backend=false -input=false
+            terraform -chdir="$dir" validate
+            echo "::endgroup::"
+          done
+```
+
+### 5. Job `plan`: un plan por proyecto (rol de solo lectura)
+
+Para cada proyecto cambiado calcula el `plan` con credenciales **de solo lectura**. En un PR lo publica como comentario.
+
+```yaml
+  plan:
+    name: plan · ${{ matrix.project.name }}   # un job por proyecto: "plan · ALB-module", ...
+    needs: [detect, checks]            # solo si fmt + validate pasaron
+    # solo si hay proyectos y está configurada la variable del rol de plan
+    if: needs.detect.outputs.has_plan == 'true' && vars.AWS_PLAN_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write       # pedir el token OIDC → credenciales del rol de plan (solo lectura)
+      pull-requests: write  # publicar el plan como comentario en el PR
+    strategy:
+      fail-fast: false                 # si un plan falla, los de los demás proyectos siguen
+      matrix:
+        project: ${{ fromJSON(needs.detect.outputs.plan) }}   # repite el job por cada proyecto
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - name: Credenciales temporales de AWS (rol de plan)
+        # cambia el token OIDC de este job por credenciales de 1 hora del rol de plan
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: gha-plan-${{ github.run_id }}   # nombre visible en CloudTrail
+
+      - name: terraform init + plan
+        id: plan
+        env:
+          DIR: ${{ matrix.project.dir }}     # manifests/ del proyecto de esta repetición
+          NAME: ${{ matrix.project.name }}
+          # "true" solo en el workflow manual con action = destroy
+          DESTROY: ${{ github.event_name == 'workflow_dispatch' && inputs.action == 'destroy' }}
+        run: |
+          # init con el backend S3: lee el state del proyecto desde el bucket
+          terraform -chdir="$DIR" init -input=false
+          extra=(); [[ "$DESTROY" == "true" ]] && extra=(-destroy)
+          set +e                       # no cortar el script si plan devuelve 2 (= hay cambios)
+          # -detailed-exitcode: 0 sin cambios, 1 error, 2 con cambios. -lock-timeout espera el bloqueo
+          terraform -chdir="$DIR" plan "${extra[@]}" -lock-timeout=5m -no-color -detailed-exitcode -out=tfplan > plan.log 2>&1
+          code=$?
+          set -e
+          cat plan.log                 # el plan completo, visible en el log del job
+          if [[ $code -eq 0 || $code -eq 2 ]]; then
+            # versión legible del plan guardado, para el resumen y el comentario del PR
+            terraform -chdir="$DIR" show -no-color tfplan > plan.txt
+          else
+            cp plan.log plan.txt       # si falló, se publica el error
+          fi
+          # línea de resumen: "Plan: 1 to add, ..." o "No changes."
+          summary=$(grep -E '^(Plan:|No changes\.)' plan.log | tail -n 1)
+          [[ -z "$summary" ]] && summary="ERROR: el plan falló (ver el log del job)"
+          # outputs del step: los usa el step que comenta el PR
+          { echo "exitcode=$code"; echo "summary=$summary"; } >> "$GITHUB_OUTPUT"
+          # resumen del job con el plan plegado (máximo 60 000 caracteres)
+          {
+            echo "### plan · $NAME"
+            echo "**$summary**"
+            echo '<details><summary>Ver plan</summary>'; echo; echo '```'; head -c 60000 plan.txt; echo '```'; echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
+          [[ $code -ne 1 ]]            # el job falla solo si el plan dio error (código 1)
+```
+
+**El comentario del plan en el PR.** Se ejecuta incluso si el plan falló (`always()`), para que el error también aparezca en el PR. Busca un comentario anterior del mismo proyecto por su marcador oculto y lo **actualiza**; si no existe, crea uno nuevo.
+
+```yaml
+      - name: Comentar el plan en el Pull Request
+        # siempre (incluso si el plan falló), solo en PRs y solo si el plan llegó a ejecutarse
+        if: always() && github.event_name == 'pull_request' && steps.plan.outputs.exitcode != ''
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PROJECT: ${{ matrix.project.name }}
+          SUMMARY: ${{ steps.plan.outputs.summary }}
+          EXITCODE: ${{ steps.plan.outputs.exitcode }}
+        with:
+          script: |
+            const fs = require('fs');
+            // marcador oculto que identifica el comentario de ESTE proyecto
+            const marker = `<!-- tf-plan:${process.env.PROJECT} -->`;
+            let plan = fs.readFileSync('plan.txt', 'utf8');
+            // GitHub limita el tamaño de los comentarios: se recorta el plan si es muy largo
+            if (plan.length > 60000) plan = plan.slice(0, 60000) + '\n... (plan truncado, ver el job)';
+            // ❌ error, 📝 con cambios, ✅ sin cambios
+            const icon = process.env.EXITCODE === '1' ? '❌' : (process.env.EXITCODE === '2' ? '📝' : '✅');
+            // texto del comentario: título, resumen, plan plegado y enlace al run
+            const body = [
+              marker,
+              `### ${icon} Terraform plan · \`${process.env.PROJECT}\``,
+              `**${process.env.SUMMARY}**`,
+              '',
+              '<details><summary>Ver el plan completo</summary>',
+              '',
+              '```hcl', plan, '```',
+              '</details>',
+              '',
+              `_Run [#${context.runNumber}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) · commit ${context.sha.slice(0, 7)}_`,
+            ].join('\n');
+            // busca entre los comentarios del PR uno anterior con el mismo marcador
+            const { data: comments } = await github.rest.issues.listComments({
+              ...context.repo, issue_number: context.issue.number, per_page: 100,
+            });
+            const previous = comments.find(c => c.body && c.body.includes(marker));
+            if (previous) {
+              // ya existía: se actualiza (un solo comentario por proyecto)
+              await github.rest.issues.updateComment({ ...context.repo, comment_id: previous.id, body });
+            } else {
+              // primera vez: se crea
+              await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
+            }
+```
+
+### 6. Job `apply`: aplicar en orden, con aprobación
+
+Solo en un **merge a `main`** o en el **workflow manual** con `apply` o `destroy`. Antes de empezar, **espera la aprobación** del environment `production`; solo con ella obtiene el rol de apply.
+
+```yaml
+  apply:
+    # nombre del job: "apply (con aprobación)", o "destroy (con aprobación)" en el manual
+    name: ${{ github.event_name == 'workflow_dispatch' && inputs.action || 'apply' }} (con aprobación)
+    needs: [detect, plan]              # todos los plan de la matrix deben haber terminado bien
+    # hay algo aplicable + variable del rol de apply + (merge a main, o manual que no sea "plan")
+    if: >-
+      needs.detect.outputs.has_apply == 'true' && vars.AWS_APPLY_ROLE_ARN != '' &&
+      ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+       (github.event_name == 'workflow_dispatch' && inputs.action != 'plan'))
+    runs-on: ubuntu-latest
+    environment: production # tiene revisores obligatorios: el job ESPERA la aprobación antes de empezar
+    permissions:
+      contents: read
+      id-token: write # token OIDC → rol de apply (que solo confía en este environment)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - name: Credenciales temporales de AWS (rol de apply)
+        # el rol de apply solo acepta tokens con sub "environment:production" (este job, aprobado)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: gha-apply-${{ github.run_id }}
+
+      - name: terraform apply en orden
+        env:
+          PROJECTS: ${{ needs.detect.outputs.apply }}   # ya viene ordenada: VPC → ALB → … → servicios
+          DESTROY: ${{ github.event_name == 'workflow_dispatch' && inputs.action == 'destroy' }}
+        run: |
+          extra=(); [[ "$DESTROY" == "true" ]] && extra=(-destroy)
+          : > applied-services.txt     # aquí se anotan los servicios aplicados (para el smoke test)
+          # jq -c '.[]' entrega un proyecto por línea, en el orden de la lista
+          jq -c '.[]' <<<"$PROJECTS" | while read -r p; do
+            name=$(jq -r '.name' <<<"$p"); dir=$(jq -r '.dir' <<<"$p")
+            echo "::group::$name"
+            terraform -chdir="$dir" init -input=false
+            set +e
+            # plan nuevo justo antes de aplicar: así ve los outputs que el proyecto anterior acaba de crear
+            terraform -chdir="$dir" plan "${extra[@]}" -lock-timeout=5m -no-color -detailed-exitcode -out=tfplan
+            code=$?
+            set -e
+            # plan con error: se detiene y no se aplica ningún proyecto más
+            if [[ $code -eq 1 ]]; then echo "::error::El plan de $name falló: se detiene el despliegue"; exit 1; fi
+            if [[ $code -eq 2 ]]; then
+              # hay cambios: aplica exactamente ese plan (sin preguntar, porque ya se aprobó el job)
+              terraform -chdir="$dir" apply -lock-timeout=5m -no-color tfplan
+              echo "- **$name**: aplicado" >> "$GITHUB_STEP_SUMMARY"
+              # si es un servicio (y no se está destruyendo), se probará en el smoke test
+              if [[ "$dir" == */ECS-services-module/services/* && "$DESTROY" != "true" ]]; then
+                echo "$dir" >> applied-services.txt
+              fi
+            else
+              echo "- **$name**: sin cambios" >> "$GITHUB_STEP_SUMMARY"
+            fi
+            echo "::endgroup::"
+          done
+```
+
+### 7. Smoke test: ¿responden los servicios?
+
+Último paso del job `apply`. Para cada servicio aplicado pide su URL por el ALB hasta recibir **HTTP 200**.
+
+```yaml
+      - name: Smoke test (los servicios responden a través del ALB)
+        run: |
+          # si no se aplicó ningún servicio, no hay nada que probar
+          [[ -s applied-services.txt ]] || { echo "No se aplicó ningún servicio."; exit 0; }
+          while read -r dir; do
+            url=$(terraform -chdir="$dir" output -raw url)   # http://<dns del ALB>/<ruta>/
+            echo "Probando $url"
+            # hasta 30 intentos cada 10 s (5 minutos): las tareas tardan en arrancar
+            for i in $(seq 1 30); do
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url" || true)
+              [[ "$code" == "200" ]] && { echo "OK $url -> 200"; break; }
+              # último intento sin 200: el job falla y el run queda en rojo
+              [[ $i -eq 30 ]] && { echo "::error::$url no respondió 200 en 5 minutos (último código: $code)"; exit 1; }
+              sleep 10
+            done
+          done < applied-services.txt
+```
+
+---
 
 ---
 
