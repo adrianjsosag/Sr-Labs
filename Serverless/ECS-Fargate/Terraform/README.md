@@ -181,6 +181,8 @@ Este README explica la **plataforma completa**: cómo encajan los módulos y en 
 | 13 | 💰 Costos | Qué cobra AWS y cómo no pagar de más |
 | 14 | 🛠️ Problemas frecuentes | Tabla de síntoma, causa probable y solución |
 
+> 🤖 **El pipeline de GitHub Actions** tiene su propio documento: [`.github/README.md`](../../../.github/README.md).
+
 > 💡 **Para desplegar por primera vez**, empieza siempre por el [bucket del state](S3-tfstate-backend-module/README.md) y sigue la [Guía de despliegue paso a paso](#guía-de-despliegue-paso-a-paso) de este README. Ve a los README de cada módulo cuando quieras entender o cambiar algo en detalle.
 
 ---
@@ -666,6 +668,8 @@ Todos los campos disponibles y la tabla de prioridades en uso: [README de servic
 
 El workflow [`.github/workflows/terraform.yml`](../../../.github/workflows/terraform.yml) valida y despliega la plataforma desde GitHub. Aplica el modelo **GitOps**: los cambios entran por un **Pull Request**, se revisan con su `plan` y se aplican tras una **aprobación**, sin ejecutar `terraform apply` desde tu PC.
 
+> 📘 **Documentación completa del pipeline:** [`.github/README.md`](../../../.github/README.md). Incluye la puesta en marcha, el flujo diario, el workflow manual, cómo funciona cada job, los permisos, el mantenimiento y los problemas frecuentes.
+
 ### Cómo funciona el proceso
 
 ```mermaid
@@ -695,67 +699,18 @@ flowchart LR
 | Proyecto | En el PR | Tras el merge |
 |---|---|---|
 | VPC, ALB, cluster, ECR y servicios | `validate` + `plan` | ✅ `apply` en orden, tras la aprobación |
-| [`EC2-bastion-host-module`](EC2-bastion-host-module/README.md) | `validate` + `plan` | ⚠️ Solo un aviso: aplícalo **desde tu PC** o con el [workflow manual](#workflow-manual). Sus provisioners se conectan por SSH desde quien aplica y el `.pem` se escribe en ese equipo |
+| [`EC2-bastion-host-module`](EC2-bastion-host-module/README.md) | `validate` + `plan` | ⚠️ Solo un aviso: aplícalo **desde tu PC** o con el [workflow manual](../../../.github/README.md#workflow-manual). Sus provisioners se conectan por SSH desde quien aplica y el `.pem` se escribe en ese equipo |
 | [`S3-tfstate-backend-module`](S3-tfstate-backend-module/README.md) y [`GitHub-OIDC-module`](GitHub-OIDC-module/README.md) | Ignorados | Ignorados: **siempre a mano** (el pipeline no puede tocar su bucket ni sus permisos) |
 | Imágenes Docker del ECR | — | **No:** súbelas con `ECR-module/push-image.sh` desde tu PC **antes** del merge. Si un servicio usa un `image_tag` que no existe, su `plan` falla |
 
-### Puesta en marcha (una sola vez)
+### Cómo empezar a usarlo
 
-1. **Bucket del state:** aplica [`S3-tfstate-backend-module`](S3-tfstate-backend-module/README.md) (si aún no existe).
-2. **Accesos del pipeline:** aplica [`GitHub-OIDC-module`](GitHub-OIDC-module/README.md) y anota sus outputs:
-   ```bash
-   cd ~/Sr-Labs/Serverless/ECS-Fargate/Terraform/GitHub-OIDC-module/manifests
-   terraform init && terraform apply           # 8 to add
-   terraform output
-   ```
-3. **Environment con aprobación.** En GitHub: *Settings → Environments → New environment* → `production`.
-   - Activa *Required reviewers* (tú o tu equipo).
-   - En *Deployment branches*, deja solo `main`.
-   > ⚠️ Sin revisores, el apply se ejecuta sin esperar a nadie.
-4. **Variables del repositorio.** *Settings → Secrets and variables → Actions → **Variables*** (no son secretos; un ARN no es confidencial):
-
-   | Variable | Valor |
-   |---|---|
-   | `AWS_REGION` | `us-east-1` |
-   | `AWS_PLAN_ROLE_ARN` | `terraform output -raw plan_role_arn` |
-   | `AWS_APPLY_ROLE_ARN` | `terraform output -raw apply_role_arn` |
-
-   Mientras no existan estas variables, el workflow solo ejecuta `fmt` y `validate`, y avisa de que se omiten `plan` y `apply`.
-5. **Proteger `main`.** *Settings → Rules → Rulesets → New branch ruleset* sobre `main`:
-   - *Require a pull request before merging*, con al menos 1 aprobación.
-   - *Require status checks to pass*: `fmt + validate`.
-   - *Block force pushes*.
-
-✅ **Comprobación:** abre un PR que cambie, por ejemplo, `desired_count` en `ECS-services-module/services/nginx-2/manifests/service.auto.tfvars`.
-1. El PR debe recibir el comentario del plan (`1 to change`).
-2. Tras el merge, el job de apply pide aprobación, aplica y el smoke test pasa.
-
-### Flujo diario
-
-```bash
-git switch -c cambio-nginx-2                  # 1. rama nueva
-# 2. edita los .tf / .tfvars (y, si es una versión nueva, sube antes la imagen con push-image.sh)
-git add . && git commit -m "nginx-2: 3 tareas"
-git push -u origin cambio-nginx-2             # 3. sube la rama
-```
-
-4. Abre el Pull Request a `main` y revisa el comentario del plan. **Fíjate en `to destroy`.**
-5. Haz merge.
-6. En *Actions*, abre el run y pulsa **Review deployments → Approve**.
-
-> ⚠️ **Eliminar un servicio:** primero `destroy` con el [workflow manual](#workflow-manual) y **después** borra su directorio en un PR. Si borras el directorio primero, el pipeline solo avisa y los recursos se quedan en AWS.
-
-### Workflow manual
-
-*Actions → Terraform → Run workflow*, desde la rama `main`:
-
-| Entrada | Valores |
+| Quiero… | Dónde |
 |---|---|
-| `project` | `VPC-module`, `ALB-module`, `ECS-cluster-module`, `EC2-bastion-host-module`, `ECR-module` o `service` |
-| `service_name` | Solo si `project = service`: el nombre del directorio, por ejemplo `nginx-1` |
-| `action` | `plan` (solo mirar), `apply` o `destroy` |
-
-Siempre muestra primero el plan (con `-destroy` si la acción es `destroy`). Para `apply` y `destroy` espera la aprobación del environment `production`.
+| Ponerlo en marcha la primera vez (OIDC, environment, variables, protección de `main`) | [Puesta en marcha](../../../.github/README.md#puesta-en-marcha-una-sola-vez) |
+| Desplegar un cambio (rama → PR → plan → merge → aprobación) | [Flujo diario](../../../.github/README.md#flujo-diario) |
+| Aplicar el Bastion, destruir un servicio o re-desplegar a mano | [Workflow manual](../../../.github/README.md#workflow-manual) |
+| Entender o modificar el workflow | [Los jobs en detalle](../../../.github/README.md#los-jobs-en-detalle) y [Mantenimiento](../../../.github/README.md#mantenimiento) |
 
 ---
 
@@ -1064,7 +1019,7 @@ flowchart LR
 | `Backend configuration changed` / `Backend initialization required` al hacer `terraform init` | Ese `manifests/` se inicializó antes con otro backend (por ejemplo, con el state local) | `terraform init -migrate-state` para copiar el state al bucket, o `-reconfigure` si no hay nada que copiar. Ver [Migrar states locales](S3-tfstate-backend-module/README.md#migrar-states-locales-al-bucket) |
 | `Error acquiring the state lock` | Otro `plan`/`apply` está usando ese state, o uno anterior se interrumpió | Espera. Si nadie lo usa: `terraform force-unlock <LOCK_ID>`, con el ID que muestra el error |
 | Pipeline: `Not authorized to perform sts:AssumeRoleWithWebIdentity` | El repositorio, la rama o el environment no coinciden con los `sub` aceptados por los roles | Revisa `terraform output github_oidc_subjects` en [`GitHub-OIDC-module`](GitHub-OIDC-module/README.md#problemas-frecuentes) |
-| Pipeline: "se omiten plan y apply" | Faltan las variables del repositorio `AWS_PLAN_ROLE_ARN`, `AWS_APPLY_ROLE_ARN` o `AWS_REGION` | Ver [Puesta en marcha](#puesta-en-marcha-una-sola-vez) |
+| Pipeline: "se omiten plan y apply" | Faltan las variables del repositorio `AWS_PLAN_ROLE_ARN`, `AWS_APPLY_ROLE_ARN` o `AWS_REGION` | Ver [Puesta en marcha](../../../.github/README.md#puesta-en-marcha-una-sola-vez) |
 | Pipeline: el apply se queda en *Waiting* | Espera la aprobación del environment `production` | *Review deployments → Approve* en la página del run |
 | `Unsupported attribute "…"` al leer un remote state | El state del otro módulo es de una versión anterior, sin ese output | Ejecuta `terraform apply` en el otro módulo para actualizar sus outputs |
 | Los nombres no coinciden entre módulos | `environment`, `business_divsion` o `aws_region` distintos en algún `terraform.tfvars` | Usa los mismos valores en todos |

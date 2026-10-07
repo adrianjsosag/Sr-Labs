@@ -207,7 +207,7 @@ terraform apply         # escribe "yes"
 terraform output        # anota plan_role_arn, apply_role_arn y aws_region
 ```
 
-Después termina la configuración en GitHub (environment `production`, variables del repositorio y protección de `main`): ver [Puesta en marcha del pipeline](../README.md#puesta-en-marcha-una-sola-vez).
+Después termina la configuración en GitHub (environment `production`, variables del repositorio y protección de `main`): ver [Puesta en marcha del pipeline](../../../../.github/README.md#puesta-en-marcha-una-sola-vez).
 
 ### Eliminar
 
