@@ -9,12 +9,14 @@ Es la **base de toda la plataforma**: el [Bastion](../EC2-bastion-host-module/RE
 
 | 🧭 Ficha rápida | |
 |---|---|
-| **Paso en el despliegue** | **1** – siempre el primero ([guía](../README.md#guía-de-despliegue-paso-a-paso)) |
-| **Depende de** | Ningún otro módulo |
+| **Paso en el despliegue** | **1** – el primero, después del bucket del state ([guía](../README.md#guía-de-despliegue-paso-a-paso)) |
+| **Depende de** | Bucket del state ([`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md)) |
 | **Lo usan** | ALB, Bastion, cluster ECS (modo EC2) y servicios: leen su state |
 | **Recursos (`plan`)** | 31 |
 | **Tiempo de despliegue** | 3–5 min |
 | **Costo principal** | NAT Gateway: por hora y por GB procesado |
+
+> ⚠️ **Antes de desplegar este módulo debe existir el bucket S3 del state** ([`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md)): su `backend.tf` guarda el state ahí. Si no existe, `terraform init` falla con `NoSuchBucket`.
 
 > 🗺️ Vista general de toda la plataforma: [README de Terraform](../README.md).
 
@@ -178,9 +180,9 @@ En palabras: *"si el usuario indicó AZs, usa esas; si no, toma las 3 primeras d
 
 ## ¿De qué depende? (remote state)
 
-**No depende de ningún otro módulo:** es lo primero que se despliega.
+**Solo necesita el [bucket del state](../S3-tfstate-backend-module/README.md)**, donde guarda su state (`VPC-module/terraform.tfstate`): es el primer módulo de la plataforma.
 
-Al revés, varios módulos leen su state (`VPC-module/manifests/terraform.tfstate`) con `terraform_remote_state`:
+Al revés, varios módulos leen su state (clave `VPC-module/terraform.tfstate` del bucket S3) con `terraform_remote_state`:
 
 | Módulo | Outputs de la VPC que lee |
 |---|---|
@@ -189,7 +191,7 @@ Al revés, varios módulos leen su state (`VPC-module/manifests/terraform.tfstat
 | [`ECS-cluster-module`](../ECS-cluster-module/README.md) (solo modo EC2) | `vpc_id`, `vpc_cidr_block`, `private_subnets`, `public_subnets_cidr_blocks` |
 | [`ECS-services-module`](../ECS-services-module/README.md) | `vpc_id`, `private_subnets` |
 
-> ⚠️ Por eso **no borres ni muevas** `terraform.tfstate` mientras la VPC exista, y destrúyela **la última**.
+> ⚠️ Por eso **no borres** su state del bucket mientras la VPC exista, y destrúyela **la última** (solo el bucket del state va después).
 
 ---
 
@@ -200,6 +202,7 @@ VPC-module/
 ├── README.md                 # Este documento
 └── manifests/
     ├── versions.tf           # Versión de Terraform, del provider AWS y la conexión con AWS
+    ├── backend.tf            # Dónde se guarda el state: bucket S3, clave VPC-module/terraform.tfstate
     ├── generic-variables.tf  # Variables generales: región, entorno, división
     ├── local-values.tf       # Valores calculados: nombre, etiquetas (tags) y AZs a usar
     ├── vpc-variables.tf      # Variables de la VPC: rangos IP, AZs, NAT, base de datos
@@ -217,6 +220,7 @@ VPC-module/
 | Archivo | Explicación |
 |---|---|
 | [`versions.tf`](manifests/versions.tf) | Define qué versión de Terraform y del *provider* de AWS se necesitan. El *provider* es el plugin que permite a Terraform hablar con AWS. Las credenciales salen de la cadena por defecto de AWS: `AWS_PROFILE`, variables de entorno o el perfil `default` de `~/.aws/credentials`. |
+| [`backend.tf`](manifests/backend.tf) | Indica que el state se guarda en el **bucket S3** de [`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md), con la clave `VPC-module/terraform.tfstate`, cifrado y con bloqueo. |
 | [`generic-variables.tf`](manifests/generic-variables.tf) | Declara variables comunes a cualquier proyecto: región, entorno (`dev`, `stag`, `prod`...) y división de negocio. |
 | [`local-values.tf`](manifests/local-values.tf) | Calcula valores a partir de otros: el prefijo del nombre (`CloudEngineering-stag`), las etiquetas comunes y la lista final de AZs. |
 | [`vpc-variables.tf`](manifests/vpc-variables.tf) | Declara las variables de la red e incluye **validaciones**. Por ejemplo, Terraform da error si no hay exactamente 3 subredes de cada tipo. |
@@ -302,7 +306,7 @@ terraform validate
 terraform plan        # solo consulta en AWS las AZs disponibles; no crea nada
 ```
 
-La VPC no lee el state de ningún otro módulo, así que el `plan` funciona directamente. Solo necesita credenciales de AWS.
+La VPC no lee el state de ningún otro módulo, así que el `plan` funciona directamente. Solo necesita credenciales de AWS y el bucket del state (para el `terraform init`). Sin bucket, usa un `backend_override.tf` local: ver [Probar sin crear nada](../README.md#probar-sin-crear-nada).
 
 ✅ **Resultado verificado** (sin `apply`): `Plan: 31 to add, 0 to change, 0 to destroy.`
 
@@ -312,13 +316,14 @@ La VPC no lee el state de ningún otro módulo, así que el `plan` funciona dire
 
 ### Requisitos previos
 
-1. **Terraform 1.16 o superior.** En este equipo está instalado en WSL; puedes comprobarlo con `terraform version`.
-2. **Credenciales de AWS** (perfil `default` o `AWS_PROFILE`). Puedes comprobarlas con:
+1. **El bucket del state creado** ([`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md)): es lo primero que se despliega.
+2. **Terraform 1.16 o superior.** En este equipo está instalado en WSL; puedes comprobarlo con `terraform version`.
+3. **Credenciales de AWS** (perfil `default` o `AWS_PROFILE`). Puedes comprobarlas con:
    ```bash
    aws sts get-caller-identity
    ```
    Si no tienes credenciales configuradas, ejecuta `aws configure`.
-3. Permisos en AWS para crear VPC, subredes, gateways, Elastic IPs y tablas de rutas.
+4. Permisos en AWS para crear VPC, subredes, gateways, Elastic IPs y tablas de rutas.
 
 ### Pasos
 
@@ -330,7 +335,7 @@ cd Serverless/ECS-Fargate/Terraform/VPC-module/manifests
 
 | # | Comando | Qué hace |
 |---|---|---|
-| 1 | `terraform init` | Descarga el provider de AWS y el módulo de VPC. Se ejecuta una vez, o de nuevo al cambiar versiones (con `-upgrade`). |
+| 1 | `terraform init` | Descarga el provider de AWS y el módulo de VPC, y conecta con el state en S3 (`VPC-module/terraform.tfstate`). Se ejecuta una vez, o de nuevo al cambiar versiones (con `-upgrade`). |
 | 2 | `terraform fmt` | Ordena el formato del código. Es opcional. |
 | 3 | `terraform validate` | Comprueba que el código no tenga errores de sintaxis. |
 | 4 | `terraform plan` | **Muestra** lo que se va a crear, sin crear nada todavía. |
@@ -353,8 +358,8 @@ terraform destroy
 
 Pide confirmación (`yes`) y borra **todos** los recursos creados por este proyecto.
 
-> ℹ️ Los archivos `.terraform/`, `.terraform.lock.hcl` y `terraform.tfstate` se generan automáticamente.
-> - **`terraform.tfstate`** es la "memoria" de Terraform: registra qué recursos creó. **No lo borres** mientras la infraestructura exista: el ALB, el Bastion, el cluster (modo EC2) y los servicios lo leen.
+> ℹ️ Los archivos `.terraform/` y `.terraform.lock.hcl` se generan automáticamente en `manifests/`.
+> - **El state** es la "memoria" de Terraform: registra qué recursos creó. Se guarda en el **bucket S3** (`VPC-module/terraform.tfstate`), no en tu PC. **No lo borres** mientras la infraestructura exista: el ALB, el Bastion, el cluster (modo EC2) y los servicios lo leen.
 > - **`.terraform.lock.hcl`** conviene subirlo a git, porque fija las versiones exactas de los providers.
 
 ---
@@ -368,7 +373,7 @@ Pide confirmación (`yes`) y borra **todos** los recursos creados por este proye
 - **IP pública automática solo en las subredes públicas** (`map_public_ip_on_launch`). Pon ahí solo lo que deba ser público: el ALB, el NAT y el Bastion.
 - **Sin VPC Flow Logs:** hoy no se registra el tráfico de red. Activarlos es una [mejora pendiente](../README.md#oportunidades-de-mejora-devsecops).
 - **Sin VPC Endpoints:** el tráfico hacia ECR, S3 o CloudWatch sale por el NAT Gateway. Ver las mismas mejoras.
-- **El state contiene IDs e IPs de la red:** no lo subas a git (ya está en el `.gitignore`).
+- **El state contiene IDs e IPs de la red:** se guarda en el bucket S3 privado y cifrado del [`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md). No descargues copias a git ni a carpetas sincronizadas.
 
 ---
 
@@ -387,6 +392,7 @@ Pide confirmación (`yes`) y borra **todos** los recursos creados por este proye
 | Síntoma | Causa probable | Solución |
 |---|---|---|
 | `Module not installed` | No se ejecutó `terraform init` | Ejecuta `terraform init` |
+| `NoSuchBucket` / `S3 bucket does not exist` en `terraform init` | Aún no existe el bucket del state, o el `bucket` de `backend.tf` no coincide | Aplica antes [`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md) |
 | `No valid credential sources found` | No hay credenciales de AWS | Ejecuta `aws configure` y comprueba el perfil `default` (o `AWS_PROFILE`) |
 | `Invalid index` / error en `slice()` | La región tiene menos de 3 AZs disponibles | Usa otra región o define `vpc_availability_zones` manualmente |
 | `must contain exactly 3 CIDR blocks` | Alguna lista de subredes no tiene 3 elementos | Revisa `vpc.auto.tfvars` |

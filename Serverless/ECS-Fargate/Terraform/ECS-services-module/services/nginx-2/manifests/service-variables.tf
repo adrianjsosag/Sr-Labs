@@ -44,27 +44,16 @@ variable "ec2_capacity_provider_name" {
   default     = "ec2"
 }
 
-# Paths to the state files of the other projects (relative to services/<name>/manifests/)
-variable "vpc_state_path" {
-  description = "Path to the terraform.tfstate of the VPC project"
+# S3 bucket with the Terraform states (S3-tfstate-backend-module). Default: <division>-<environment>-tfstate-<account_id>
+variable "state_bucket" {
+  description = "S3 bucket of the Terraform states (null = name derived like S3-tfstate-backend-module)"
   type        = string
-  default     = "../../../../VPC-module/manifests/terraform.tfstate"
+  default     = null
 }
 
-variable "alb_state_path" {
-  description = "Path to the terraform.tfstate of the ALB project"
+# TESTS ONLY: directory with local <project>.tfstate files used instead of the S3 bucket
+variable "remote_state_local_dir" {
+  description = "Tests only: directory with local <project>.tfstate files (VPC-module.tfstate, ALB-module.tfstate, ECS-cluster-module.tfstate, ECR-module.tfstate) instead of S3"
   type        = string
-  default     = "../../../../ALB-module/manifests/terraform.tfstate"
-}
-
-variable "ecs_cluster_state_path" {
-  description = "Path to the terraform.tfstate of the ECS cluster project"
-  type        = string
-  default     = "../../../../ECS-cluster-module/manifests/terraform.tfstate"
-}
-
-variable "ecr_state_path" {
-  description = "Path to the terraform.tfstate of the ECR project (only used with ecr_repository)"
-  type        = string
-  default     = "../../../../ECR-module/manifests/terraform.tfstate"
+  default     = null
 }

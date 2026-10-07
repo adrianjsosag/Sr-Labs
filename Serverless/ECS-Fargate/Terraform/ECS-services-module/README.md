@@ -13,11 +13,13 @@ Las imágenes se guardan en tu registro privado [**ECR**](../ECR-module/README.m
 | 🧭 Ficha rápida | |
 |---|---|
 | **Paso en el despliegue** | **5** – siempre el último ([guía](../README.md#guía-de-despliegue-paso-a-paso)) |
-| **Depende de** | VPC, ALB, cluster ECS y, si usa `ecr_repository`, ECR con la imagen subida |
+| **Depende de** | Bucket del state, VPC, ALB, cluster ECS y, si usa `ecr_repository`, ECR con la imagen subida |
 | **Lo usan** | Tus usuarios, a través del ALB (`http://<dns del ALB>/<ruta>`) |
 | **Recursos (`plan`)** | 17 por servicio |
 | **Tiempo de despliegue** | 2–5 min por servicio (hasta que las tareas pasan el health check) |
 | **Costo principal** | Tareas Fargate: por vCPU y GB de memoria por segundo |
+
+> ⚠️ **Antes de desplegar este módulo debe existir el bucket S3 del state** ([`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md)): su `backend.tf` guarda el state ahí. Si no existe, `terraform init` falla con `NoSuchBucket`.
 
 > 🗺️ Vista general de toda la plataforma: [README de Terraform](../README.md).
 
@@ -85,7 +87,7 @@ La raíz `http://<dns del ALB>/` sigue respondiendo `404`, porque ningún servic
 | **Task (tarea)** | Una copia de tu aplicación en ejecución. |
 | **Service (servicio)** | Mantiene corriendo `desired_count` tareas, las reemplaza si fallan y las registra en el ALB. |
 | **Módulo reutilizable** | Código Terraform que se escribe una vez (`modules/ecs-service/`) y se usa en cada servicio con distintos valores, como una plantilla. |
-| **State por servicio** | Cada `services/<nombre>/manifests/` guarda su propio `terraform.tfstate`. Un `apply` o `destroy` solo afecta a ese servicio. |
+| **State por servicio** | Cada servicio guarda su propio state en el bucket S3, con la clave `ECS-services-module/services/<nombre>/terraform.tfstate` (en su `backend.tf`). Un `apply` o `destroy` solo afecta a ese servicio. |
 | **`awsvpc`** | Modo de red en el que **cada tarea tiene su propia IP privada y su propio Security Group** (en Fargate y en EC2). |
 | **Target group tipo `ip`** | El ALB envía el tráfico directamente a la IP de cada tarea. |
 | **Health check** | El ALB pide `health_check_path` a cada tarea. Si no responde `200`, deja de enviarle tráfico y ECS la reemplaza. |
@@ -208,14 +210,16 @@ el launch_type del servicio.
 
 ## ¿De qué depende? (remote state)
 
-Cada servicio lee los states locales de otros módulos en [`remote-state-datasource.tf`](services/nginx-1/manifests/remote-state-datasource.tf). Las rutas son relativas a `services/<nombre>/manifests/`, por eso suben 4 niveles:
+Cada servicio guarda su state en el [bucket S3](../S3-tfstate-backend-module/README.md) con su **propia clave** (`ECS-services-module/services/<nombre>/terraform.tfstate`, en su `backend.tf`) y lee los states de otros módulos en [`remote-state-datasource.tf`](services/nginx-1/manifests/remote-state-datasource.tf):
 
-| State | Ruta por defecto (variable) | Valores que usa | ¿Cuándo? |
+| State | Clave en el bucket S3 | Valores que usa | ¿Cuándo? |
 |---|---|---|---|
-| VPC | `vpc_state_path` → `../../../../VPC-module/manifests/terraform.tfstate` | `vpc_id`, `private_subnets` | Siempre |
-| ALB | `alb_state_path` → `../../../../ALB-module/manifests/terraform.tfstate` | `http_listener_arn`, `alb_security_group_id`, `alb_dns_name` | Siempre |
-| Cluster ECS | `ecs_cluster_state_path` → `../../../../ECS-cluster-module/manifests/terraform.tfstate` | `cluster_arn` y los capacity providers (`cluster_capacity_providers` o `capacity_providers`) | Siempre |
-| ECR | `ecr_state_path` → `../../../../ECR-module/manifests/terraform.tfstate` | `repository_urls`, `repository_names` | **Solo** si el servicio usa `ecr_repository` |
+| VPC | `VPC-module/terraform.tfstate` | `vpc_id`, `private_subnets` | Siempre |
+| ALB | `ALB-module/terraform.tfstate` | `http_listener_arn`, `alb_security_group_id`, `alb_dns_name` | Siempre |
+| Cluster ECS | `ECS-cluster-module/terraform.tfstate` | `cluster_arn` y los capacity providers (`cluster_capacity_providers` o `capacity_providers`) | Siempre |
+| ECR | `ECR-module/terraform.tfstate` | `repository_urls`, `repository_names` | **Solo** si el servicio usa `ecr_repository` |
+
+El nombre del bucket se calcula solo (`<división>-<entorno>-tfstate-<cuenta>`); la variable `state_bucket` permite cambiarlo.
 
 Si el servicio usa `ecr_repository`, también se consulta en AWS la **imagen** con `data "aws_ecr_image"`, para obtener su **digest**. Si ese `image_tag` no está subido, el `plan` falla en ese punto.
 
@@ -238,11 +242,12 @@ ECS-services-module/
     ├── nginx-1/                     # UN PROYECTO TERRAFORM POR SERVICIO
     │   └── manifests/
     │       ├── versions.tf          #   Terraform + provider AWS
+    │       ├── backend.tf           #   state en el bucket S3: key PROPIA de cada servicio
     │       ├── generic-variables.tf #   región, entorno, división
     │       ├── terraform.tfvars     #   us-east-1 / stag / CloudEngineering
     │       ├── local-values.tf      #   nombres, tags, capacity providers del cluster
     │       ├── remote-state-datasource.tf  # states de la VPC, el ALB, el cluster y (opcional) el ECR + imagen
-    │       ├── service-variables.tf #   variable "service" + rutas de los states
+    │       ├── service-variables.tf #   variable "service" + bucket de los states
     │       ├── service.tf           #   module "service" { source = "../../../modules/ecs-service" }
     │       ├── service-outputs.tf   #   url + datos del servicio
     │       └── service.auto.tfvars  #   ← LOS DATOS DE ESTE SERVICIO (lo único que cambia)
@@ -280,6 +285,7 @@ Cada servicio tiene sus valores en `services/<nombre>/manifests/`:
 
 | Archivo | Qué contiene |
 |---|---|
+| `backend.tf` | Dónde se guarda el state del servicio: el bucket S3 y su **`key` propia** (`ECS-services-module/services/<nombre>/terraform.tfstate`) |
 | `terraform.tfvars` | Generales: `aws_region`, `environment`, `business_divsion`. Deben coincidir con los demás módulos |
 | `service.auto.tfvars` | La variable `service`: los datos de tu aplicación. Ver [Cómo se define un servicio](#cómo-se-define-un-servicio-serviceautotfvars) |
 
@@ -288,10 +294,8 @@ Otras variables, con valor por defecto, que normalmente no se tocan:
 | Variable | Valor por defecto | Descripción |
 |---|---|---|
 | `ec2_capacity_provider_name` | `ec2` | Capacity provider del cluster en modo EC2 |
-| `vpc_state_path` | `../../../../VPC-module/manifests/terraform.tfstate` | Ruta al state de la VPC |
-| `alb_state_path` | `../../../../ALB-module/manifests/terraform.tfstate` | Ruta al state del ALB |
-| `ecs_cluster_state_path` | `../../../../ECS-cluster-module/manifests/terraform.tfstate` | Ruta al state del cluster |
-| `ecr_state_path` | `../../../../ECR-module/manifests/terraform.tfstate` | Ruta al state del ECR (solo con `ecr_repository`) |
+| `state_bucket` | `null` → `cloudengineering-stag-tfstate-<cuenta>` | Bucket S3 con los states de los demás módulos. Solo hace falta si el bucket tiene otro nombre |
+| `remote_state_local_dir` | `null` | **Solo pruebas:** carpeta con states ficticios (`VPC-module.tfstate`, `ALB-module.tfstate`, …) que se leen en lugar del bucket |
 
 ### Cómo se define un servicio (service.auto.tfvars)
 
@@ -389,7 +393,7 @@ terraform validate
 terraform plan          # necesita los states de la VPC, el ALB y el cluster
 ```
 
-Si los otros proyectos aún no están aplicados, se pueden usar **states ficticios** con `-var vpc_state_path=... -var alb_state_path=... -var ecs_cluster_state_path=...` (y `-var ecr_state_path=...` si usa ECR). Ver la [técnica en el README general](../README.md#probar-sin-crear-nada).
+Si el bucket o los otros proyectos aún no existen, se pueden usar **states ficticios** locales con un `backend_override.tf` temporal y `-var remote_state_local_dir=/ruta/a/states-ficticios`. Ver la [técnica en el README general](../README.md#probar-sin-crear-nada).
 
 > ⚠️ El módulo **consulta en AWS las subredes**, así que el state ficticio de la VPC debe usar **IDs de subred reales**, por ejemplo los de la VPC por defecto. Con IDs inventados, el `plan` falla con `no matching EC2 Subnet found`.
 
@@ -416,7 +420,7 @@ Si los otros proyectos aún no están aplicados, se pueden usar **states fictici
 
 ### Requisitos previos
 
-1. **Aplicados, en este orden:** `VPC-module` (con NAT Gateway), `ALB-module`, `ECS-cluster-module` y `ECR-module`.
+1. **Aplicados, en este orden:** `S3-tfstate-backend-module` (bucket del state), `VPC-module` (con NAT Gateway), `ALB-module`, `ECS-cluster-module` y `ECR-module`.
 2. **Imagen subida** al ECR con el `image_tag` del servicio:
    ```bash
    cd Serverless/ECS-Fargate/Terraform/ECR-module
@@ -474,12 +478,15 @@ terraform destroy
    terraform -chdir=manifests apply
    ./push-image.sh mi-api 1.0.0 --build ~/proyectos/mi-api
    ```
-2. **Copia el directorio de un servicio existente.** Copia solo los `.tf` y `.tfvars`: **nunca** `.terraform/`, que apunta al state del servicio original.
+2. **Copia el directorio de un servicio existente y cambia la `key` de su `backend.tf`.** Copia solo los `.tf` y `.tfvars`: **nunca** `.terraform/`.
    ```bash
    cd ../ECS-services-module/services
    mkdir -p mi-api/manifests
    cp nginx-1/manifests/*.tf nginx-1/manifests/*.tfvars mi-api/manifests/
+   sed -i 's#services/nginx-1/terraform.tfstate#services/mi-api/terraform.tfstate#' mi-api/manifests/backend.tf
+   grep key mi-api/manifests/backend.tf     # → "ECS-services-module/services/mi-api/terraform.tfstate"
    ```
+   > ⚠️ **Si no cambias la `key`, el servicio nuevo usaría el state de `nginx-1`** y el `plan` querría destruirlo. Revisa siempre que el `plan` diga `0 to destroy`.
 3. **Edita `mi-api/manifests/service.auto.tfvars`** con los datos de tu aplicación:
    ```hcl
    service = {
@@ -583,14 +590,15 @@ aws ecs execute-command --cluster $CLUSTER --task "$TASK" --container nginx-1 --
 |---|---|---|
 | `Resource precondition failed … usa launch_type EC2 … el cluster ECS solo tiene [FARGATE, FARGATE_SPOT]` | El servicio y el cluster están en modos distintos | Cambia el modo del cluster (`switch-launch-type.sh` + `apply`) o el `launch_type` del servicio |
 | `PriorityInUse` al aplicar | Otro servicio (otro directorio) ya usa esa `listener_rule_priority` | Elige una libre y actualiza la [tabla de prioridades](#cómo-añadir-una-aplicación-nueva) |
-| `Unable to find remote state` | Falta aplicar la VPC, el ALB o el cluster, o una ruta es incorrecta (desde `services/<nombre>/manifests/` se suben **4** niveles) | Aplica en orden o corrige `*_state_path` |
+| `Unable to find remote state` | Falta aplicar la VPC, el ALB o el cluster, o el bucket no es el esperado | Aplica en orden. Si el bucket tiene otro nombre, pásalo con `state_bucket` |
+| `NoSuchBucket` / `S3 bucket does not exist` en `terraform init` | Aún no existe el bucket del state, o el `bucket` de `backend.tf` no coincide | Aplica antes [`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md) |
 | `must be equal to the service directory name` | El `name` de `service.auto.tfvars` no coincide con el directorio (típico al copiar un servicio) | Pon `name` igual al nombre del directorio |
 | `expected length of name_prefix to be in the range (1 - 38)` | Un nombre de rol IAM demasiado largo | El módulo ya usa nombres cortos. Si cambias el patrón, mantenlo por debajo de 38 caracteres |
 | `no matching EC2 Subnet found` | El state de la VPC tiene subredes que no existen | Aplica la VPC real o usa IDs reales en el state ficticio |
-| Copié un servicio y `plan` quiere **destruir** el original | Se copió también el `terraform.tfstate` | Borra el `terraform.tfstate` del directorio nuevo: copia solo `*.tf` y `*.tfvars` |
+| Copié un servicio y el `plan` quiere **destruir** el original | El `backend.tf` copiado conserva la `key` del servicio original: ambos usan el mismo state | Cambia la `key` del `backend.tf` nuevo a `ECS-services-module/services/<nuevo>/terraform.tfstate` y ejecuta `terraform init -reconfigure` |
 | Tareas en `PENDING` → `STOPPED` con `CannotPullContainerError` | Sin salida a Internet o la imagen no existe | Revisa el NAT Gateway y el nombre y tag de la imagen |
 | `plan`: `reading ECR Images: couldn't find resource` | El `image_tag` no está subido en el repositorio `ecr_repository` | Súbelo: `ECR-module/push-image.sh <repo> <tag> …` |
-| `plan`: `Unable to find remote state` y el servicio usa ECR | `ECR-module` no está aplicado o `ecr_state_path` es incorrecta | Aplica `ECR-module` o corrige la ruta |
+| `plan`: `Unable to find remote state` y el servicio usa ECR | `ECR-module` no está aplicado | Aplica `ECR-module` |
 | `plan`: `Define the image in ONE way` | Hay `image` y `ecr_repository` a la vez, o falta `image_tag` | Usa `ecr_repository` + `image_tag`, **o** `image` |
 | La tarea falla con `exec format error` | La imagen es ARM y Fargate usa x86_64 | Súbela con `--platform linux/amd64` (valor por defecto de `push-image.sh`) |
 | `503 Service Temporarily Unavailable` | No hay tareas sanas en el target group | `describe-target-health`; revisa `health_check_path`, `container_port` y los logs |

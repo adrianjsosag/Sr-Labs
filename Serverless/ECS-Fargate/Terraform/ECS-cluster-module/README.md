@@ -9,11 +9,13 @@ Tus aplicaciones se despliegan sobre este cluster con [`ECS-services-module`](..
 | 🧭 Ficha rápida | |
 |---|---|
 | **Paso en el despliegue** | **3** ([guía](../README.md#guía-de-despliegue-paso-a-paso)) |
-| **Depende de** | Nada en modo Fargate · [`VPC-module`](../VPC-module/README.md) en modo EC2 |
+| **Depende de** | Bucket del state ([`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md)) · [`VPC-module`](../VPC-module/README.md) solo en modo EC2 |
 | **Lo usan** | [`ECS-services-module`](../ECS-services-module/README.md): los servicios se despliegan en este cluster |
 | **Recursos (`plan`)** | 4 (Fargate) / 21 (EC2) |
 | **Tiempo de despliegue** | ~1 min (Fargate) / 3–5 min (EC2) |
 | **Costo principal** | Casi nada en Fargate (se pagan las tareas de los servicios) · las instancias `t3.medium` en EC2 |
+
+> ⚠️ **Antes de desplegar este módulo debe existir el bucket S3 del state** ([`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md)): su `backend.tf` guarda el state ahí. Si no existe, `terraform init` falla con `NoSuchBucket`.
 
 > 🗺️ Vista general de toda la plataforma: [README de Terraform](../README.md).
 
@@ -162,12 +164,12 @@ module "ecs_cluster" {
 
 ## ¿De qué depende? (remote state)
 
-Depende del **modo** del cluster:
+Guarda su state en el [bucket S3](../S3-tfstate-backend-module/README.md) (`ECS-cluster-module/terraform.tfstate`). Lo que lee depende del **modo** del cluster:
 
 | Modo | Lee el state de | Valores que usa |
 |---|---|---|
 | **fargate** (actual) | Ninguno | — |
-| **ec2** | VPC: `vpc_state_path` → `../../VPC-module/manifests/terraform.tfstate` | `vpc_id`, `vpc_cidr_block`, `private_subnets`, `public_subnets_cidr_blocks` |
+| **ec2** | VPC: clave `VPC-module/terraform.tfstate` del bucket S3 (variable `state_bucket` si el bucket tiene otro nombre) | `vpc_id`, `vpc_cidr_block`, `private_subnets`, `public_subnets_cidr_blocks` |
 
 Después, **cada servicio** de [`ECS-services-module`](../ECS-services-module/README.md) lee el state del cluster para obtener `cluster_arn` y los capacity providers. Ver [Cómo usar el cluster desde otro proyecto](#cómo-usar-el-cluster-desde-otro-proyecto).
 
@@ -183,6 +185,7 @@ ECS-cluster-module/
 ├── switch-launch-type.sh            # Script para cambiar entre Fargate y EC2
 └── manifests/
     ├── versions.tf                  # Terraform + providers (aws; tls y local los usa EC2)
+    ├── backend.tf                   # State en el bucket S3 (clave ECS-cluster-module/terraform.tfstate)
     ├── generic-variables.tf         # región, entorno, división
     ├── local-values.tf              # name, common_tags, cluster_name  + bloque [EC2] ec2_key_name
     ├── terraform.tfvars             # us-east-1 / stag / CloudEngineering
@@ -207,7 +210,7 @@ ECS-cluster-module/
 |---|---|---|
 | `.terraform/` | `terraform init` | No (ignorado por el `.gitignore` de la raíz) |
 | `.terraform.lock.hcl` | `terraform init` | **Sí**: fija las versiones exactas de los providers |
-| `terraform.tfstate` | Solo con `terraform apply` (`plan` no lo crea) | No |
+| State `ECS-cluster-module/terraform.tfstate` | Con `terraform apply`. Se guarda en el **bucket S3** ([`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md)), no en esta carpeta | — |
 
 ---
 
@@ -234,7 +237,7 @@ ECS-cluster-module/
 | `business_divsion` | texto | `CloudEngineering` | Área responsable (nombres y etiquetas) |
 | `ecs_container_insights` | texto | `disabled` | `enabled` activa métricas detalladas (con costo) |
 
-**Variables del bloque `[EC2]`**, comentadas en modo Fargate, en `ecs-variables.tf` y `ecs.auto.tfvars`: `ecs_instance_type`, `ecs_asg_min_size`, `ecs_asg_max_size`, `ecs_asg_desired_capacity`, `ecs_root_volume_size`, `ecs_target_capacity` y `vpc_state_path` (ruta al state de la VPC: `../../VPC-module/manifests/terraform.tfstate`).
+**Variables del bloque `[EC2]`**, comentadas en modo Fargate, en `ecs-variables.tf` y `ecs.auto.tfvars`: `ecs_instance_type`, `ecs_asg_min_size`, `ecs_asg_max_size`, `ecs_asg_desired_capacity`, `ecs_root_volume_size`, `ecs_target_capacity`, `state_bucket` (bucket del state; por defecto se calcula solo) y `remote_state_local_dir` (solo pruebas: states ficticios locales).
 
 ---
 
@@ -252,11 +255,11 @@ ECS-cluster-module/
 
 ## Cómo probarlo sin crear nada (plan)
 
-Estos comandos **solo leen** información de AWS. No crean, cambian ni borran nada, y tampoco generan `terraform.tfstate`:
+Estos comandos **solo leen** información de AWS. No crean, cambian ni borran nada, y tampoco modifican el state:
 
 ```bash
 cd Serverless/ECS-Fargate/Terraform/ECS-cluster-module/manifests
-terraform init                  # descarga providers y módulos
+terraform init                  # descarga providers y módulos, y conecta con el bucket del state
 terraform fmt -check -recursive # revisa el formato (sin salida = correcto)
 terraform validate              # revisa la sintaxis y las referencias
 terraform plan                  # muestra lo que se crearía
@@ -312,9 +315,10 @@ Changes to Outputs:
 
 ### Requisitos previos
 
-1. **Terraform 1.16 o superior**, que en este equipo está en WSL.
-2. **Credenciales de AWS** (perfil `default` o `AWS_PROFILE`). Compruébalas con `aws sts get-caller-identity`.
-3. **Solo en modo EC2:** la VPC ya debe estar creada (debe existir `VPC-module/manifests/terraform.tfstate`).
+1. **El bucket del state creado** ([`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md)): es lo primero que se despliega.
+2. **Terraform 1.16 o superior**, que en este equipo está en WSL.
+3. **Credenciales de AWS** (perfil `default` o `AWS_PROFILE`). Compruébalas con `aws sts get-caller-identity`.
+4. **Solo en modo EC2:** la VPC ya debe estar creada (su state `VPC-module/terraform.tfstate` debe existir en el bucket).
 
 > ℹ️ **El cluster Fargate no necesita la VPC ni el Bastion.** Puede crearse antes o después que ellos.
 > Los **servicios** que despliegues después sí necesitarán la VPC: subredes privadas con salida por el NAT Gateway, para descargar imágenes.
@@ -327,7 +331,7 @@ cd Serverless/ECS-Fargate/Terraform/ECS-cluster-module/manifests
 
 | # | Comando | Qué hace |
 |---|---|---|
-| 1 | `terraform init` | Descarga los providers y el módulo ECS |
+| 1 | `terraform init` | Descarga los providers y el módulo ECS, y conecta con el state en S3 (`ECS-cluster-module/terraform.tfstate`) |
 | 2 | `terraform validate` | Comprueba que el código no tenga errores |
 | 3 | `terraform plan` | **Muestra** lo que se va a crear, sin crearlo |
 | 4 | `terraform apply` | Crea los recursos. Escribe `yes` para confirmar |
@@ -365,17 +369,13 @@ Lee los outputs de este proyecto con `terraform_remote_state`, el mismo mecanism
 ```hcl
 # En ECS-services-module/services/<servicio>/manifests/remote-state-datasource.tf (extracto)
 data "terraform_remote_state" "ecs_cluster" {
-  backend = "local"
-  config = {
-    path = var.ecs_cluster_state_path   # "../../../../ECS-cluster-module/manifests/terraform.tfstate"
-  }
+  backend = local.remote_state_backend                # "s3" (o "local" en pruebas)
+  config  = local.remote_state_config["ecs_cluster"]  # key = "ECS-cluster-module/terraform.tfstate"
 }
 
 data "terraform_remote_state" "vpc" {
-  backend = "local"
-  config = {
-    path = var.vpc_state_path           # "../../../../VPC-module/manifests/terraform.tfstate"
-  }
+  backend = local.remote_state_backend
+  config  = local.remote_state_config["vpc"]          # key = "VPC-module/terraform.tfstate"
 }
 
 # Uso:
@@ -455,7 +455,7 @@ Ejemplo real en `ecs-cluster.tf`, en modo Fargate:
 |---|---|---|
 | `ecs-cluster.tf` | Capacity providers `FARGATE`/`FARGATE_SPOT` y la estrategia por defecto `FARGATE` | Capacity provider `ec2` (ASG + managed scaling) y la estrategia por defecto `ec2` |
 | `ecs-outputs.tf` | Output `cluster_capacity_providers` | Outputs del ASG, Security Groups, rol IAM, AMI, key pair y `.pem` |
-| `ecs-variables.tf` | — | Variables de EC2 (tipo, tamaños del ASG, disco, `ecs_target_capacity`, `vpc_state_path`) |
+| `ecs-variables.tf` | — | Variables de EC2 (tipo, tamaños del ASG, disco, `ecs_target_capacity`, `state_bucket`, `remote_state_local_dir`) |
 | `ecs.auto.tfvars` | — | Valores de esas variables |
 | `local-values.tf` | — | `ec2_key_name` |
 | `remote-state-datasource.tf` | — | Todo el archivo (lectura del state de la VPC) |
@@ -734,7 +734,7 @@ Además:
 | Toca | No toca |
 |---|---|
 | Los `.tf` y `.tfvars` de `manifests/` que tienen bloques (10 archivos) | `versions.tf`, `generic-variables.tf` y `terraform.tfvars`, que no tienen bloques |
-| `manifests/.launch-type-backup/`, donde crea y poda copias | `terraform.tfstate`, `.terraform.lock.hcl` y la infraestructura en AWS |
+| `manifests/.launch-type-backup/`, donde crea y poda copias | El state (en el bucket S3), `.terraform.lock.hcl` y la infraestructura en AWS |
 
 ### Verificación realizada
 
@@ -776,7 +776,7 @@ El script convive con los cambios manuales siempre que respetes el formato de lo
 - **Modo EC2:**
   - Las instancias van en las subredes **privadas**, sin IP pública, con el disco raíz **cifrado**.
   - SSH (puerto 22) solo desde las subredes públicas, donde está el Bastion, con una llave **distinta** de la del Bastion (`CloudEngineering-stag-ecs-cluster-ec2`).
-  - La llave privada queda en `manifests/private-key/` y en `terraform.tfstate`, **sin cifrar**. No los subas a git (ya están en el `.gitignore`).
+  - La llave privada queda en `manifests/private-key/` (**sin cifrar**) y en el state del bucket S3 (cifrado con SSE-S3). No subas el `.pem` a git (ya está en el `.gitignore`) y limita quién puede leer el bucket.
   - Alternativa más segura: **SSM Session Manager**. Las instancias ya tienen la política `AmazonSSMManagedInstanceCore`.
 - **Container Insights está desactivado** (`disabled`): no hay métricas detalladas. Ver [mejoras DevSecOps](../README.md#oportunidades-de-mejora-devsecops).
 
@@ -814,4 +814,5 @@ El script convive con los cambios manuales siempre que respetes el formato de lo
 | `ecs_container_insights must be "enabled" or "disabled"` | Valor no válido | Usa exactamente `enabled` o `disabled` |
 | El `plan` muestra recursos EC2 (ASG, key pair, SG...) y querías Fargate | El cluster está en modo `ec2`, o hay bloques mezclados | `./switch-launch-type.sh status` y después `./switch-launch-type.sh fargate` |
 | `No valid credential sources found` en el `plan` | Faltan credenciales de AWS | Ejecuta `aws configure` y revisa el perfil `default` |
+| `NoSuchBucket` / `S3 bucket does not exist` en `terraform init` | Aún no existe el bucket del state, o el `bucket` de `backend.tf` no coincide | Aplica antes [`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md) |
 | `aws ecs execute-command` falla con `TargetNotConnectedException` | El servicio no tiene `enable_execute_command = true`, o falta el plugin de Session Manager | Activa la opción en el servicio, vuelve a desplegar las tareas e instala el plugin |

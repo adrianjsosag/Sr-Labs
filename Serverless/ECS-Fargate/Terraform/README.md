@@ -6,7 +6,17 @@ Las aplicaciones pueden ejecutarse de dos formas:
 - **AWS Fargate:** AWS administra los servidores; tú solo defines los contenedores. Es la opción **por defecto**.
 - **Instancias EC2:** servidores propios en un Auto Scaling Group que administra el cluster.
 
-La plataforma está dividida en **6 proyectos (módulos) independientes** que se despliegan **a mano** con Terraform, desde tu terminal. Cada uno tiene su propio README con todos los detalles; este documento explica **cómo encajan** y **cómo usarlos juntos**.
+La plataforma está dividida en **6 proyectos (módulos) independientes** que se despliegan **a mano** con Terraform, desde tu terminal, más un **bucket S3** donde todos guardan su state. Cada uno tiene su propio README con todos los detalles; este documento explica **cómo encajan** y **cómo usarlos juntos**.
+
+> ⚠️ **Antes de desplegar nada: crea el bucket S3 del state.**
+>
+> Los 6 módulos guardan su state de Terraform en un bucket S3. Si el bucket no existe, el `terraform init` de cualquier módulo falla con `NoSuchBucket`. Se crea **una sola vez**, con [`S3-tfstate-backend-module`](S3-tfstate-backend-module/README.md):
+>
+> ```bash
+> cd ~/Sr-Labs/Serverless/ECS-Fargate/Terraform/S3-tfstate-backend-module/manifests && terraform init && terraform apply
+> ```
+>
+> Detalle en el [Paso 0 de la guía](#paso-0-bucket-s3-del-state-obligatorio-una-sola-vez).
 
 ---
 
@@ -34,6 +44,7 @@ La plataforma está dividida en **6 proyectos (módulos) independientes** que se
 
 Imagina que quieres publicar una aplicación web (una API, una página, un microservicio) empaquetada como **imagen de contenedor** (Docker). Para que funcione en AWS de forma segura y escalable necesitas:
 
+0. **Un lugar seguro donde Terraform guarda su "memoria" (el state)**: es lo primero que se crea → [`S3-tfstate-backend-module`](S3-tfstate-backend-module/README.md).
 1. **Una red privada** con zonas públicas y privadas → [`VPC-module`](VPC-module/README.md).
 2. **Una puerta de entrada web** que reparta el tráfico → [`ALB-module`](ALB-module/README.md).
 3. **Un lugar donde corran los contenedores** (Fargate o EC2) → [`ECS-cluster-module`](ECS-cluster-module/README.md).
@@ -45,6 +56,7 @@ Imagina que quieres publicar una aplicación web (una API, una página, un micro
 >
 > | Pieza del edificio | Módulo |
 > |---|---|
+> | El **archivo central de planos**, que se instala antes de construir nada | Bucket del state (S3) |
 > | El **edificio**, con zonas abiertas al público y zonas privadas | VPC |
 > | La **recepción** que recibe a los visitantes y los dirige a cada departamento | ALB |
 > | La **gestión de espacios de oficina** | Cluster ECS |
@@ -92,9 +104,11 @@ flowchart TB
         cluster["Cluster ECS<br/>CloudEngineering-stag-ecs-cluster<br/>(ECS-cluster-module)"]
         ecr[("ECR privado (ECR-module)<br/>imágenes de tus apps<br/>IMMUTABLE + escaneo")]
         cw[("CloudWatch Logs")]
+        tfstate[("S3: states de Terraform<br/>(S3-tfstate-backend-module)<br/>se crea primero")]
     end
 
     dev(("Tú"))
+    dev -- "terraform (guarda y lee el state)" --> tfstate
     dev -- "push-image.sh" --> ecr
     user -- "HTTP" --> igw --> alb
     alb -- "reglas por ruta<br/>(ECS-services-module)" --> t1
@@ -126,6 +140,7 @@ flowchart TB
 
 | Módulo | Qué crea | Lee el state de | Recursos (`plan`) | Documentación |
 |---|---|---|---|---|
+| [`S3-tfstate-backend-module`](S3-tfstate-backend-module/) | **Una sola vez, antes que todo.** Bucket S3 privado, versionado y cifrado donde se guardan los states de todos los proyectos (bloqueo nativo, solo TLS). Su propio state es local | — | 7 | [README](S3-tfstate-backend-module/README.md) |
 | [`VPC-module`](VPC-module/) | VPC, 9 subredes (pública, privada y database × 3 AZs), Internet Gateway, NAT Gateway, tablas de rutas, DB subnet group | — | 31 | [README](VPC-module/README.md) |
 | [`EC2-bastion-host-module`](EC2-bastion-host-module/) | Bastion EC2 (Amazon Linux 2023) en una subred pública, Elastic IP, Security Group, key pair propio | VPC | 9 | [README](EC2-bastion-host-module/README.md) |
 | [`ALB-module`](ALB-module/) | Application Load Balancer público, su Security Group y el listener HTTP :80 (404 por defecto) | VPC | 5 | [README](ALB-module/README.md) |
@@ -164,16 +179,17 @@ Este README explica la **plataforma completa**: cómo encajan los módulos y en 
 | 13 | 💰 Costos | Qué cobra AWS y cómo no pagar de más |
 | 14 | 🛠️ Problemas frecuentes | Tabla de síntoma, causa probable y solución |
 
-> 💡 **Para desplegar por primera vez**, sigue la [Guía de despliegue paso a paso](#guía-de-despliegue-paso-a-paso) de este README. Ve a los README de cada módulo cuando quieras entender o cambiar algo en detalle.
+> 💡 **Para desplegar por primera vez**, empieza siempre por el [bucket del state](S3-tfstate-backend-module/README.md) y sigue la [Guía de despliegue paso a paso](#guía-de-despliegue-paso-a-paso) de este README. Ve a los README de cada módulo cuando quieras entender o cambiar algo en detalle.
 
 ---
 
 ## Dependencias y orden de despliegue
 
-Cada módulo es un proyecto Terraform **independiente**, con su propio `terraform.tfstate` (local, en su carpeta `manifests/`). Se conectan entre sí **leyendo los outputs del state de otro módulo** con `terraform_remote_state`, sin copiar IDs a mano:
+Cada módulo es un proyecto Terraform **independiente**, con su propio state: una clave en el [bucket S3](S3-tfstate-backend-module/README.md). Se conectan entre sí **leyendo los outputs del state de otro módulo** con `terraform_remote_state`, sin copiar IDs a mano:
 
 ```mermaid
 flowchart LR
+    s3[("S3-tfstate-backend-module<br/>bucket del state (paso 0)")]
     vpc["VPC-module"]
     bastion["EC2-bastion-host-module<br/>(opcional)"]
     alb["ALB-module"]
@@ -188,22 +204,24 @@ flowchart LR
     alb -- "http_listener_arn, alb_security_group_id, alb_dns_name" --> svc
     cluster -- "cluster_arn, capacity providers" --> svc
     ecr -- "repository_urls, repository_names<br/>+ imagen subida (digest)" --> svc
+    s3 -. "guarda y sirve los states" .-> vpc & alb & cluster & ecr & svc & bastion
 ```
 
 🔢 **Orden de despliegue:**
 
 | # | Módulo | Notas |
 |---|---|---|
-| 1 | `VPC-module` | Siempre el primero |
+| 0 | `S3-tfstate-backend-module` | **Una sola vez**, antes que todo: crea el bucket donde se guardan los states |
+| 1 | `VPC-module` | Siempre el primero de la plataforma |
 | 2 | `ALB-module` | Necesita la VPC |
 | 3 | `ECS-cluster-module` | En modo Fargate no depende de nada; en modo EC2 necesita la VPC |
 | 4 | `ECR-module` + `push-image.sh` | No depende de nada, pero las **imágenes deben estar subidas antes de los servicios** |
 | 5 | `ECS-services-module` | Siempre el último: necesita VPC, ALB, cluster y sus imágenes en el ECR |
 | — | `EC2-bastion-host-module` | Opcional; en cualquier momento después de la VPC |
 
-🧹 **Orden de destrucción:** el **inverso**: Servicios → ECR → Cluster → ALB → Bastion → VPC.
+🧹 **Orden de destrucción:** el **inverso**: Servicios → ECR → Cluster → ALB → Bastion → VPC → *(solo si abandonas la plataforma)* bucket del state.
 
-> ⚠️ **Los states son archivos locales** (`<módulo>/manifests/terraform.tfstate`). Los demás módulos los leen por ruta relativa, así que **ejecuta todo desde la misma copia del proyecto** y no borres ni muevas esos archivos mientras la infraestructura exista. Sin ellos, Terraform "olvida" lo que creó.
+> ℹ️ **Los states viven en el bucket S3** (`cloudengineering-stag-tfstate-<cuenta>`), uno por proyecto, cifrados y versionados. No dependen de tu PC: puedes trabajar desde cualquier copia del proyecto tras un `terraform init`, y el bloqueo evita que dos `apply` pisen el mismo state.
 
 > ⚠️ Si destruyes un módulo del que otros dependen, AWS impedirá borrar recursos todavía en uso. Por ejemplo, no se puede borrar el listener del ALB si aún tiene reglas de servicios.
 
@@ -270,12 +288,13 @@ Esta guía despliega **toda la plataforma** en tu cuenta de AWS con los módulos
 |---|---|
 | **Dónde se ejecuta** | Terminal de **WSL / Ubuntu**, en `~/Sr-Labs/Serverless/ECS-Fargate/Terraform/` |
 | **Tiempo aproximado** | 25–35 minutos en total (lo que más tarda es el NAT Gateway, el ALB y el arranque de las tareas) |
-| **Recursos que se crean** | Modo Fargate: 31 (VPC) + 5 (ALB) + 4 (cluster) + 4 (ECR) + 17 × 2 (servicios) = **78**, +9 con el Bastion |
+| **Recursos que se crean** | 7 (bucket del state, **solo la primera vez**: paso 0) + modo Fargate: 31 (VPC) + 5 (ALB) + 4 (cluster) + 4 (ECR) + 17 × 2 (servicios) = **78**, +9 con el Bastion |
 | **Costo** | Empieza a cobrarse en cuanto se crea el NAT Gateway (paso 1). Ver [Costos](#costos) |
 
 ```mermaid
 flowchart LR
-    P0["0. Preparación<br/>(una sola vez)"] --> P1["1. VPC-module<br/>31 recursos"]
+    PA["Antes de empezar<br/>herramientas y preparación"] --> P0["0. Bucket S3 del state<br/>7 recursos (una sola vez)"]
+    P0 --> P1["1. VPC-module<br/>31 recursos"]
     P1 --> P2["2. ALB-module<br/>5 recursos"]
     P1 --> P3["3. ECS-cluster-module<br/>4 (Fargate) / 21 (EC2)"]
     P0 --> P4["4. ECR-module<br/>4 recursos<br/>+ push-image.sh"]
@@ -288,7 +307,7 @@ flowchart LR
 
 > ⚠️ **Regla de oro:** en cada paso, **lee el `plan`** que muestra `terraform apply` antes de escribir `yes`. Comprueba que el número de recursos coincide con el de esta guía y que dice **`0 to destroy`**.
 
-### Paso 0: Preparación (una sola vez)
+### Antes de empezar: herramientas y preparación
 
 ```bash
 cd ~/Sr-Labs/Serverless/ECS-Fargate/Terraform
@@ -312,6 +331,32 @@ aws iam create-service-linked-role --aws-service-name ecs.amazonaws.com
   - `ALB-module/manifests/alb.auto.tfvars` → `alb_allowed_cidrs = ["<tu-ip>/32"]`.
   - `EC2-bastion-host-module/manifests/ec2bastion.auto.tfvars` → `bastion_ssh_allowed_cidrs = ["<tu-ip>/32"]`.
 
+### Paso 0: Bucket S3 del state (obligatorio, una sola vez)
+
+**Va antes que cualquier otro módulo.** Los 6 módulos guardan su state en este bucket (cada uno con su `key` en `backend.tf`). Sin él, su `terraform init` falla con `NoSuchBucket`.
+
+```bash
+cd S3-tfstate-backend-module/manifests
+terraform init
+terraform apply          # plan esperado: 7 to add
+terraform output state_bucket    # → cloudengineering-stag-tfstate-<cuenta>
+cd ../..
+```
+
+| Qué se crea | Tiempo aprox. | Comprobar |
+|---|---|---|
+| Bucket S3 privado, versionado, cifrado (AES256), solo TLS y con ciclo de vida de versiones | Menos de 1 min | `aws s3api get-bucket-versioning --bucket cloudengineering-stag-tfstate-373716886058` → `"Status": "Enabled"` |
+
+🔎 **Qué debe quedar:**
+- El bucket existe en S3.
+- `S3-tfstate-backend-module/manifests/terraform.tfstate` existe en tu PC: es el **único state local** de la plataforma. Guarda una copia de seguridad.
+
+> ℹ️ **Solo la primera vez.** Si el bucket ya existe (por ejemplo, vuelves a desplegar después de un `destroy`), sáltate este paso.
+>
+> Si `terraform output state_bucket` no coincide con el `bucket` de los `backend.tf` (otra cuenta u otro entorno), actualízalos antes de seguir: ver [README del módulo](S3-tfstate-backend-module/README.md#cómo-funciona).
+>
+> Si tenías states locales de antes, mígralos: ver [Migrar states locales al bucket](S3-tfstate-backend-module/README.md#migrar-states-locales-al-bucket).
+
 ### Paso 1: Red (`VPC-module`)
 
 Es la base de todo; **siempre va primero**.
@@ -327,7 +372,7 @@ cd ../..
 |---|---|---|
 | VPC, 9 subredes en 3 AZs, Internet Gateway, **NAT Gateway**, tablas de rutas, DB subnet group | 3–5 min | `terraform -chdir=VPC-module/manifests output vpc_id` |
 
-🔎 **Qué debe quedar:** `VPC-module/manifests/terraform.tfstate` existe y tiene, entre otros, los outputs `vpc_id`, `public_subnets`, `private_subnets` y `public_subnets_cidr_blocks`, que leen los demás módulos.
+🔎 **Qué debe quedar:** el state `VPC-module/terraform.tfstate` existe en el bucket (`aws s3 ls s3://cloudengineering-stag-tfstate-373716886058/VPC-module/`) y tiene, entre otros, los outputs `vpc_id`, `public_subnets`, `private_subnets` y `public_subnets_cidr_blocks`, que leen los demás módulos.
 
 ### Paso 2: Balanceador (`ALB-module`)
 
@@ -473,6 +518,9 @@ El orden es **el mismo**; solo cambian dos cosas:
 Cuando ya conoces el proceso, desde `~/Sr-Labs/Serverless/ECS-Fargate/Terraform/`:
 
 ```bash
+# 0. Bucket del state: SOLO la primera vez (si ya existe, sáltalo)
+(cd S3-tfstate-backend-module/manifests && terraform init && terraform apply)
+
 # Orden: VPC -> ALB -> Cluster -> ECR (+ imágenes) -> Servicios  (cada apply pide confirmación "yes")
 for d in VPC-module ALB-module ECS-cluster-module ECR-module; do
   echo "=== $d ===" && (cd "$d/manifests" && terraform init -input=false && terraform apply) || break
@@ -525,7 +573,9 @@ done
 (cd VPC-module/manifests && terraform destroy)
 ```
 
-> ℹ️ `destroy` usa el `terraform.tfstate` de cada `manifests/`. Ejecútalo en la **misma copia del proyecto** donde hiciste el `apply`: en otra copia sin esos archivos, Terraform no sabe qué borrar.
+> ℹ️ `destroy` lee el state de cada proyecto desde el bucket S3, así que funciona desde cualquier copia del proyecto después de un `terraform init`.
+>
+> El **bucket del state no se destruye aquí**: guarda el historial de todos los proyectos. Bórralo solo si abandonas la plataforma, siguiendo su [README](S3-tfstate-backend-module/README.md#eliminar).
 
 🧹 **Comprobación final** (no debe quedar nada que cobre):
 
@@ -541,14 +591,16 @@ aws ecr describe-repositories --query 'repositories[].repositoryName'           
 
 🔢 **Resumen del orden:**
 
-| | 1 | 2 | 3 | 4 | 5 | 6 |
-|---|---|---|---|---|---|---|
-| **Desplegar** | VPC | ALB | Cluster | ECR + `push-image.sh` | Servicios | Bastion *(opcional, cuando quieras tras la VPC)* |
-| **Destruir** | Servicios | ECR | Cluster | ALB | Bastion | VPC |
+| | 0 | 1 | 2 | 3 | 4 | 5 | 6 |
+|---|---|---|---|---|---|---|---|
+| **Desplegar** | Bucket del state *(una vez)* | VPC | ALB | Cluster | ECR + `push-image.sh` | Servicios | Bastion *(opcional, cuando quieras tras la VPC)* |
+| **Destruir** | Servicios | ECR | Cluster | ALB | Bastion | VPC | Bucket del state *(solo al abandonar la plataforma)* |
 
 ---
 
 ## Guía: desplegar mi aplicación
+
+📋 **Requisito:** la plataforma ya desplegada con la [Guía de despliegue](#guía-de-despliegue-paso-a-paso), empezando por el [bucket del state](#paso-0-bucket-s3-del-state-obligatorio-una-sola-vez). El servicio nuevo guardará su state en ese bucket.
 
 1. **Crea su repositorio en ECR y sube la imagen** con [`ECR-module`](ECR-module/README.md):
    ```bash
@@ -559,12 +611,15 @@ aws ecr describe-repositories --query 'repositories[].repositoryName'           
    ./push-image.sh mi-api 1.0.0 --build ~/proyectos/mi-api
    cd ..
    ```
-2. **Crea su directorio** copiando uno existente. Copia solo los `.tf` y `.tfvars`: **nunca** el `terraform.tfstate` ni `.terraform/`.
+2. **Crea su directorio** copiando uno existente y **cambia la `key` de su `backend.tf`**. Copia solo los `.tf` y `.tfvars`: **nunca** `.terraform/`.
    ```bash
    cd ECS-services-module/services
    mkdir -p mi-api/manifests
    cp nginx-1/manifests/*.tf nginx-1/manifests/*.tfvars mi-api/manifests/
+   sed -i 's#services/nginx-1/terraform.tfstate#services/mi-api/terraform.tfstate#' mi-api/manifests/backend.tf
+   grep key mi-api/manifests/backend.tf     # → "ECS-services-module/services/mi-api/terraform.tfstate"
    ```
+   > ⚠️ **Si no cambias la `key`, el servicio nuevo usaría el state de `nginx-1`** y el `plan` querría destruirlo. Revisa siempre que el `plan` diga `0 to destroy`.
 3. **Descríbela** en `ECS-services-module/services/mi-api/manifests/service.auto.tfvars`:
    ```hcl
    service = {
@@ -587,7 +642,7 @@ aws ecr describe-repositories --query 'repositories[].repositoryName'           
 4. **Revisa y aplica** en el directorio de tu servicio:
    ```bash
    cd mi-api/manifests
-   terraform init      # su state será mi-api/manifests/terraform.tfstate
+   terraform init      # su state será ECS-services-module/services/mi-api/terraform.tfstate, en el bucket
    terraform plan      # 17 recursos nuevos; los otros servicios no aparecen (tienen su propio state)
    terraform apply
    ```
@@ -618,7 +673,7 @@ Todos los módulos siguen el mismo patrón, así que si entiendes uno, entiendes
 | **Etiquetas** | Todos los recursos llevan `owners = CloudEngineering` y `environment = stag` |
 | **Variables generales** | `aws_region = us-east-1`, `environment = stag`, `business_divsion = CloudEngineering`. **Deben coincidir en todos los módulos** |
 | **Versiones** | Terraform `>= 1.16`, provider AWS `~> 6.67`, módulos de `terraform-aws-modules` con **versión fija** |
-| **State** | **Local**: `terraform.tfstate` en el `manifests/` de cada proyecto. Los proyectos se leen entre sí con `terraform_remote_state` (backend `local`) mediante las variables `*_state_path`, con rutas relativas |
+| **State** | En el **bucket S3** de [`S3-tfstate-backend-module`](S3-tfstate-backend-module/README.md): privado, cifrado (SSE-S3), versionado y con bloqueo nativo. Cada `manifests/backend.tf` tiene su propia `key` (`VPC-module/terraform.tfstate`, `ECS-services-module/services/<nombre>/terraform.tfstate`…). Los proyectos se leen entre sí con `terraform_remote_state` (backend `s3`). El módulo del bucket es el único con state local |
 | **Llaves SSH** | Se generan con Terraform y se guardan en `manifests/private-key/`. Bastion y cluster EC2 usan llaves **distintas** |
 | **Git** | El [`.gitignore`](../../../.gitignore) de la raíz ignora `.terraform/`, `*.tfstate`, `*.pem`, `private-key/` y las copias de seguridad del script. **Sí** se suben `.terraform.lock.hcl` y los `.tfvars` |
 
@@ -635,7 +690,7 @@ Todos los módulos siguen el mismo patrón, así que si entiendes uno, entiendes
 | Plugin de Session Manager | Opcional (ECS Exec / SSM) | `session-manager-plugin` |
 | Docker (con `buildx`) | **Necesario** para subir imágenes al ECR (`push-image.sh`). Docker Engine en WSL o Docker Desktop con integración WSL | `docker info` |
 
-Permisos en AWS para crear VPC, EC2, ELB, ECS, IAM, CloudWatch Logs y Application Auto Scaling.
+Permisos en AWS para crear VPC, EC2, ELB, ECS, IAM, CloudWatch Logs, Application Auto Scaling y S3 (bucket del state).
 
 ---
 
@@ -645,20 +700,21 @@ Permisos en AWS para crear VPC, EC2, ELB, ECS, IAM, CloudWatch Logs y Applicatio
 
 ```bash
 cd <Módulo>/manifests
-terraform init
+terraform init          # conecta con el bucket S3 del state (debe existir)
 terraform fmt -check
 terraform validate
 terraform plan
 ```
 
-🧪 **Módulos que dependen de otros que aún no existen.** El `plan` necesita los states de esos otros módulos. Para probar sin desplegarlos, crea **states ficticios** (un JSON con solo los outputs que se leen) **fuera** de las carpetas `manifests/`, y pásalos con las variables `*_state_path`:
+> ℹ️ Solo para revisar la sintaxis, sin bucket: `terraform init -backend=false && terraform validate`.
 
-| Proyecto | Variables |
-|---|---|
-| `ALB-module`, `EC2-bastion-host-module`, `ECS-cluster-module` (modo EC2) | `vpc_state_path` |
-| `ECS-services-module/services/<nombre>` | `vpc_state_path`, `alb_state_path`, `ecs_cluster_state_path` y, si usa ECR, `ecr_state_path` |
+🧪 **Sin bucket, o con módulos que aún no existen.** El `plan` necesita el bucket y los states de los módulos de los que depende. Para probar sin desplegar nada:
+1. **Crea un archivo temporal `backend_override.tf`** en el `manifests/` del proyecto, para usar un backend local. Los `*_override.tf` ya están en el `.gitignore`.
+2. **Crea una carpeta con states ficticios** llamados `<Proyecto>.tfstate`: `VPC-module.tfstate`, `ALB-module.tfstate`, `ECS-cluster-module.tfstate`, `ECR-module.tfstate`. Cada uno es un JSON con solo los outputs que se leen.
+3. **Pásala con `-var remote_state_local_dir=/ruta/carpeta`.** Esta variable existe **solo para pruebas**: hace que los `terraform_remote_state` lean esos archivos en lugar del bucket.
+4. **Al terminar, borra `backend_override.tf`** y vuelve al backend S3 con `terraform init -reconfigure`.
 
-Ejemplo de state ficticio de la VPC (`/tmp/states-de-prueba/vpc.tfstate`):
+Ejemplo de `VPC-module.tfstate`:
 
 ```json
 {
@@ -675,17 +731,21 @@ Ejemplo de state ficticio de la VPC (`/tmp/states-de-prueba/vpc.tfstate`):
 
 ```bash
 cd ALB-module/manifests
-terraform plan -var vpc_state_path=/tmp/states-de-prueba/vpc.tfstate
+printf 'terraform {\n  backend "local" {}\n}\n' > backend_override.tf
+terraform init -reconfigure
+terraform plan -var remote_state_local_dir=/tmp/states-de-prueba
+rm backend_override.tf && terraform init -reconfigure    # ¡no lo dejes!: vuelve al backend S3
 ```
 
-> - **No copies los states ficticios a las rutas reales** (`<módulo>/manifests/terraform.tfstate`): Terraform los tomaría como el state de verdad de ese proyecto.
+> - **No subas ni dejes `backend_override.tf`:** mientras exista, el proyecto usa un state local en lugar del bucket.
 > - **Nunca hagas `apply` con un state ficticio:** los IDs no existen y el `apply` fallaría a medias.
 > - `ECS-services-module` consulta las subredes en AWS. Para él, usa **IDs de subred reales**, por ejemplo los de la VPC por defecto.
 
-✅ **Resultados verificados** (sin `apply`, Terraform 1.16.5, AWS provider 6.67.0). Se probó con una copia del proyecto con states ficticios en las rutas por defecto, ejecutando `terraform init` y `terraform plan` sin `-var`, en el orden de despliegue:
+✅ **Resultados verificados** (sin `apply`, Terraform 1.16.5, AWS provider 6.67.0). Se probó con una copia del proyecto, un `backend_override.tf` local y states ficticios (`remote_state_local_dir`):
 
 | Módulo | `validate` | `plan` |
 |---|---|---|
+| `S3-tfstate-backend-module` | OK | 7 recursos: bucket `cloudengineering-stag-tfstate-373716886058`, versionado, AES256, bloqueo público, ciclo de vida de 90 días y política TLS |
 | `VPC-module` | OK | 31 recursos |
 | `EC2-bastion-host-module` | OK | 9 recursos (VPC simulada) |
 | `ALB-module` | OK | 5 recursos (VPC simulada) |
@@ -701,6 +761,7 @@ Aproximados, en la región `us-east-1`. **Lo que cobra por hora aunque no haya t
 
 | Módulo | Recursos con costo | Comentario |
 |---|---|---|
+| S3 state backend | Almacenamiento y peticiones del bucket | Menos de 1 USD al mes |
 | VPC | **NAT Gateway** (hora + GB), **IPv4 pública** del NAT | El costo fijo más alto de la plataforma |
 | Bastion | **EC2 `t3.micro`**, EBS, **Elastic IP** | Destrúyelo si no lo usas |
 | ALB | **ALB** (hora + LCU), **IPv4 públicas** (una por AZ) | |
@@ -726,7 +787,7 @@ Aproximados, en la región `us-east-1`. **Lo que cobra por hora aunque no haya t
   - ALB → tareas (solo el puerto de cada app, solo desde el SG del ALB).
   - Bastion → instancias EC2 (SSH desde las subredes públicas).
 - **Llaves separadas:** la llave del Bastion no abre las instancias del cluster.
-- **Los states contienen secretos:** las llaves privadas generadas por Terraform quedan en `terraform.tfstate` **sin cifrar**. No los subas a git (ya están en el `.gitignore`), haz copia de seguridad en un lugar privado y considera un backend remoto cifrado.
+- **Los states contienen secretos:** las llaves privadas generadas por Terraform quedan dentro del state. Por eso se guardan en un bucket S3 **privado, cifrado (SSE-S3), versionado y que solo acepta TLS** ([`S3-tfstate-backend-module`](S3-tfstate-backend-module/README.md)). Limita quién puede leer ese bucket y nunca subas un `.tfstate` a git (ya está en el `.gitignore`).
 - **Restringe los accesos:** `alb_allowed_cidrs` y `bastion_ssh_allowed_cidrs` están en `0.0.0.0/0` para el laboratorio. Ponlos en tu IP (`x.x.x.x/32`) mientras pruebas.
 - **No pongas secretos en `environment`:** usa AWS Secrets Manager o SSM Parameter Store.
 - **IMDSv2 obligatorio y discos cifrados** en las instancias EC2.
@@ -781,7 +842,7 @@ Las 6 mejoras con **mayor impacto en seguridad** para empezar:
 
 | # | Mejora | Por qué primero |
 |---|---|---|
-| 1 | **State remoto en S3 cifrado con KMS, versionado y con bloqueo** | Hoy el state es local y contiene **llaves privadas sin cifrar**. Un state perdido o filtrado compromete toda la plataforma |
+| 1 | ✅ **State remoto en S3, cifrado, versionado y con bloqueo** *(implementado: `S3-tfstate-backend-module`)* | Un state perdido o filtrado compromete toda la plataforma: contiene **llaves privadas**. **Pendiente:** llave KMS propia y limitar quién lee el bucket |
 | 2 | **Pipeline CI/CD con OIDC + escáneres de IaC y de secretos** | Elimina la necesidad de credenciales locales de larga duración y bloquea configuraciones inseguras antes de aplicarlas |
 | 3 | **HTTPS (ACM + Route 53) y AWS WAF en el ALB** | Hoy el tráfico viaja **sin cifrar** por HTTP :80, sin protección frente a ataques web |
 | 4 | **SSM Session Manager en lugar de SSH y llaves** | Elimina el puerto 22, las llaves en el state y la llave copiada en `/tmp` del Bastion |
@@ -834,7 +895,7 @@ Las 6 mejoras con **mayor impacto en seguridad** para empezar:
 |---|---|---|---|---|---|---|
 | **Pipeline CI/CD de infraestructura** | `apply` manual desde un portátil | GitHub Actions / GitLab CI / CodePipeline. En el PR: `fmt`, `validate`, `tflint`, checkov, `plan` (comentado en el PR y guardado como artefacto). En el merge: `apply` del **mismo** plan tras **aprobación manual** en entornos protegidos | `.github/workflows/` | 🔴 | M | SSDF PS, WA-OPS |
 | **Autenticación OIDC sin claves** | Se usan credenciales locales de larga duración (perfil de `~/.aws/credentials`) | **OIDC** del proveedor de CI → `AssumeRoleWithWebIdentity`. Rol de **plan** (solo lectura) separado del rol de **apply**, uno por entorno | IAM + pipeline | 🔴 | M | CIS 1.x, WA-SEC 2 |
-| **State remoto seguro** | `terraform.tfstate` local, sin cifrar, sin bloqueo ni versionado, con llaves privadas dentro | Bucket S3 con **SSE-KMS (CMK)**, versionado, *Block Public Access*, política que exige TLS y solo permite los roles del pipeline, y bloqueo nativo (`use_lockfile = true`). `terraform_remote_state` con `backend = "s3"` | Todos los módulos | 🔴 | S | CIS, WA-SEC 8 |
+| ✅ **State remoto seguro** *(implementado)* | **Hecho:** bucket S3 con versionado, cifrado **SSE-S3**, *Block Public Access*, política que exige TLS y bloqueo nativo (`use_lockfile = true`). `terraform_remote_state` con `backend = "s3"` | **Pendiente:** cifrado **SSE-KMS** con llave propia (CMK) y política del bucket que solo permita a los usuarios y roles que despliegan | `S3-tfstate-backend-module` + todos los módulos | 🔴 | S | CIS, WA-SEC 8 |
 | **Desacoplar módulos** | Cada módulo lee el **state completo** de otros, que incluye datos sensibles | Publicar solo los valores necesarios en **SSM Parameter Store** (`/platform/stag/alb/listener_arn`) y leerlos con `data "aws_ssm_parameter"`. Así se aplica mínimo privilegio sobre el state | Outputs → SSM | 🟠 | M | WA-SEC |
 | **Orquestación del orden** | El orden VPC → ALB → Cluster → ECR → Servicios se sigue a mano | Terragrunt (`dependency`) o pipeline por etapas con dependencias explícitas | Pipeline | 🟢 | M | WA-OPS |
 | **Despliegues seguros de aplicaciones** | Despliegue *rolling* por defecto | `deployment_circuit_breaker` con **rollback** explícito. Despliegues **blue/green** o canary (soportados por el módulo de servicios) y alarmas que detengan el despliegue | `ECS-services-module/modules/ecs-service/main.tf` | 🟠 | M | WA-REL |
@@ -871,7 +932,7 @@ Las 6 mejoras con **mayor impacto en seguridad** para empezar:
 
 ```mermaid
 flowchart LR
-    F1["Fase 1 – Fundamentos<br/>(semanas 1-2)<br/>• State S3 cifrado + bloqueo<br/>• Pre-commit: checkov, tflint, gitleaks<br/>• Restringir CIDRs / quitar SSH abierto<br/>• CloudTrail + GuardDuty<br/>• HTTPS con ACM"]
+    F1["Fase 1 – Fundamentos<br/>(semanas 1-2)<br/>• ✅ State S3 cifrado + bloqueo (hecho)<br/>• Pre-commit: checkov, tflint, gitleaks<br/>• Restringir CIDRs / quitar SSH abierto<br/>• CloudTrail + GuardDuty<br/>• HTTPS con ACM"]
     F2["Fase 2 – Pipeline seguro<br/>(semanas 3-6)<br/>• CI/CD con OIDC y aprobaciones<br/>• Policy as Code (OPA/Conftest)<br/>• ✅ ECR + escaneo + digest (hecho)<br/>• Inspector + KMS en ECR<br/>• Secrets Manager<br/>• SSM en lugar de Bastion/llaves<br/>• terraform test + alarmas"]
     F3["Fase 3 – Madurez<br/>(trimestre)<br/>• Multi-cuenta + SCPs<br/>• WAF + logs de acceso + Flow Logs<br/>• SBOM y firma de imágenes<br/>• DAST con ZAP<br/>• Security Hub + Config<br/>• VPC endpoints, blue/green<br/>• Cambio de modo nativo (sin script)"]
     F1 --> F2 --> F3
@@ -897,8 +958,10 @@ flowchart LR
 
 | Síntoma | Causa probable | Solución |
 |---|---|---|
-| `Unable to find remote state` | Un módulo del que depende no está aplicado (no existe su `manifests/terraform.tfstate`), o una ruta `*_state_path` es incorrecta | Aplica los módulos [en orden](#dependencias-y-orden-de-despliegue), desde la misma copia del proyecto |
-| `Backend configuration changed` / `Backend initialization required` al hacer `terraform init` | Ese `manifests/` se inicializó antes con otro backend (por ejemplo S3) | `terraform init -reconfigure` |
+| `Unable to find remote state` | Un módulo del que depende no está aplicado (no existe su state en el bucket), o el bucket no es el esperado | Aplica los módulos [en orden](#dependencias-y-orden-de-despliegue). Si el bucket tiene otro nombre, pásalo con la variable `state_bucket` |
+| `NoSuchBucket` / `S3 bucket does not exist` al hacer `terraform init` | El bucket del state aún no existe, o el `bucket` de `backend.tf` no coincide | Aplica [`S3-tfstate-backend-module`](S3-tfstate-backend-module/README.md) ([paso 0](#paso-0-bucket-s3-del-state-obligatorio-una-sola-vez)) |
+| `Backend configuration changed` / `Backend initialization required` al hacer `terraform init` | Ese `manifests/` se inicializó antes con otro backend (por ejemplo, con el state local) | `terraform init -migrate-state` para copiar el state al bucket, o `-reconfigure` si no hay nada que copiar. Ver [Migrar states locales](S3-tfstate-backend-module/README.md#migrar-states-locales-al-bucket) |
+| `Error acquiring the state lock` | Otro `plan`/`apply` está usando ese state, o uno anterior se interrumpió | Espera. Si nadie lo usa: `terraform force-unlock <LOCK_ID>`, con el ID que muestra el error |
 | `Unsupported attribute "…"` al leer un remote state | El state del otro módulo es de una versión anterior, sin ese output | Ejecuta `terraform apply` en el otro módulo para actualizar sus outputs |
 | Los nombres no coinciden entre módulos | `environment`, `business_divsion` o `aws_region` distintos en algún `terraform.tfvars` | Usa los mismos valores en todos |
 | `curl` al ALB responde `404: no hay ningun servicio en esta ruta` | No hay servicios desplegados o la ruta no coincide | Despliega `ECS-services-module` o revisa `path_patterns` |

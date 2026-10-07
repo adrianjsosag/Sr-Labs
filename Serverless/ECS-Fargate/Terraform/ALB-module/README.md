@@ -7,11 +7,13 @@ El ALB se despliega en las **subredes públicas** de la VPC creada por [`VPC-mod
 | 🧭 Ficha rápida | |
 |---|---|
 | **Paso en el despliegue** | **2** ([guía](../README.md#guía-de-despliegue-paso-a-paso)) |
-| **Depende de** | [`VPC-module`](../VPC-module/README.md) |
+| **Depende de** | Bucket del state ([`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md)) y [`VPC-module`](../VPC-module/README.md) |
 | **Lo usan** | [`ECS-services-module`](../ECS-services-module/README.md): cada servicio crea su regla y su target group |
 | **Recursos (`plan`)** | 5 |
 | **Tiempo de despliegue** | 2–4 min |
 | **Costo principal** | El ALB: por hora y por uso (LCU), más sus IPv4 públicas |
+
+> ⚠️ **Antes de desplegar este módulo debe existir el bucket S3 del state** ([`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md)): su `backend.tf` guarda el state ahí. Si no existe, `terraform init` falla con `NoSuchBucket`.
 
 > 🗺️ Vista general de toda la plataforma: [README de Terraform](../README.md).
 
@@ -75,8 +77,8 @@ Un balanceador público llamado `CloudEngineering-stag-alb`, repartido en las 3 
 flowchart TB
     internet((Internet))
 
-    subgraph vpcstate["VPC-module"]
-        tfstate[("terraform.tfstate<br/>vpc_id, public_subnets,<br/>vpc_cidr_block")]
+    subgraph vpcstate["State de VPC-module (bucket S3)"]
+        tfstate[("VPC-module/terraform.tfstate<br/>vpc_id, public_subnets,<br/>vpc_cidr_block")]
     end
 
     subgraph vpc["VPC 10.0.0.0/16"]
@@ -140,11 +142,13 @@ module "alb" {
 
 ## ¿De qué depende? (remote state)
 
-Lee el state de la VPC con `terraform_remote_state` ([`remote-state-datasource.tf`](manifests/remote-state-datasource.tf)):
+Guarda su state en el [bucket S3](../S3-tfstate-backend-module/README.md) (`ALB-module/terraform.tfstate`) y lee el de la VPC con `terraform_remote_state` ([`remote-state-datasource.tf`](manifests/remote-state-datasource.tf)):
 
-| State | Ruta por defecto (variable) | Valores que usa |
+| State | Clave en el bucket S3 | Valores que usa |
 |---|---|---|
-| VPC | `vpc_state_path` → `../../VPC-module/manifests/terraform.tfstate` | `vpc_id`, `public_subnets`, `vpc_cidr_block` |
+| VPC | `VPC-module/terraform.tfstate` | `vpc_id`, `public_subnets`, `vpc_cidr_block` |
+
+El nombre del bucket se calcula solo (`<división>-<entorno>-tfstate-<cuenta>`); la variable `state_bucket` permite cambiarlo.
 
 Después, **cada servicio** de [`ECS-services-module`](../ECS-services-module/README.md) lee el state del ALB para obtener `http_listener_arn`, `alb_security_group_id` y `alb_dns_name`.
 
@@ -157,6 +161,7 @@ ALB-module/
 ├── README.md
 └── manifests/
     ├── versions.tf                  # Terraform + provider AWS
+    ├── backend.tf                   # State en el bucket S3 (clave ALB-module/terraform.tfstate)
     ├── generic-variables.tf         # región, entorno, división
     ├── local-values.tf              # name, common_tags, alb_name
     ├── terraform.tfvars             # us-east-1 / stag / CloudEngineering
@@ -187,7 +192,8 @@ ALB-module/
 | `alb_allowed_cidrs` | lista | `["0.0.0.0/0"]` | Quién puede abrir la web. Para pruebas privadas usa tu IP, por ejemplo `["203.0.113.10/32"]` |
 | `alb_enable_deletion_protection` | sí/no | `false` | `true` impide borrar el ALB (también con `terraform destroy`) |
 | `alb_idle_timeout` | número | `60` | Segundos que una conexión puede estar inactiva |
-| `vpc_state_path` | texto | `../../VPC-module/manifests/terraform.tfstate` | Ruta al state de la VPC (relativa a `manifests/`) |
+| `state_bucket` | texto | `null` → `cloudengineering-stag-tfstate-<account_id>` | Bucket S3 con el state de la VPC. Solo hace falta si el bucket tiene otro nombre |
+| `remote_state_local_dir` | texto | `null` | **Solo pruebas:** carpeta con states ficticios (`VPC-module.tfstate`) que se leen en lugar del bucket |
 
 ---
 
@@ -209,13 +215,13 @@ ALB-module/
 cd Serverless/ECS-Fargate/Terraform/ALB-module/manifests
 terraform init
 terraform validate
-terraform plan        # necesita el state de la VPC (VPC-module/manifests/terraform.tfstate)
+terraform plan        # necesita el bucket del state y el state de la VPC en él
 ```
 
-Si la VPC todavía no existe, puedes probarlo con un **state ficticio** que tenga los outputs `vpc_id`, `public_subnets` y `vpc_cidr_block`. Ver [cómo hacerlo](../README.md#probar-sin-crear-nada):
+Si el bucket o la VPC todavía no existen, puedes probarlo con un `backend_override.tf` local y un **state ficticio** `VPC-module.tfstate` que tenga los outputs `vpc_id`, `public_subnets` y `vpc_cidr_block`. Ver [cómo hacerlo](../README.md#probar-sin-crear-nada):
 
 ```bash
-terraform plan -var vpc_state_path=/ruta/a/vpc-fake.tfstate
+terraform plan -var remote_state_local_dir=/ruta/a/states-ficticios
 ```
 
 ✅ **Resultado verificado** (state de la VPC simulado): `Plan: 5 to add, 0 to change, 0 to destroy.`
@@ -231,7 +237,7 @@ terraform plan -var vpc_state_path=/ruta/a/vpc-fake.tfstate
 
 ### Requisitos previos
 
-1. **La VPC ya debe estar creada**: debe existir `VPC-module/manifests/terraform.tfstate`.
+1. **El bucket del state y la VPC ya deben estar creados** ([`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md) y `VPC-module`): el ALB lee el state de la VPC desde el bucket.
 2. **Credenciales de AWS** (perfil `default` o `AWS_PROFILE`). Compruébalas con `aws sts get-caller-identity`.
 3. *(Recomendado)* Pon tu IP en `alb_allowed_cidrs` dentro de `alb.auto.tfvars`. Puedes averiguarla con `curl -s https://checkip.amazonaws.com`.
 
@@ -284,7 +290,8 @@ Para no pagar de más: `terraform destroy` al terminar el laboratorio.
 
 | Síntoma | Causa probable | Solución |
 |---|---|---|
-| `Unable to find remote state` | La VPC no está aplicada o `vpc_state_path` es incorrecta | Aplica `VPC-module` o corrige la ruta |
+| `Unable to find remote state` | La VPC no está aplicada, o el bucket no es el esperado | Aplica `VPC-module`. Si el bucket tiene otro nombre, pásalo con `state_bucket` |
+| `NoSuchBucket` / `S3 bucket does not exist` en `terraform init` | Aún no existe el bucket del state, o el `bucket` de `backend.tf` no coincide | Aplica antes [`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md) |
 | `curl` responde `404: no hay ningun servicio en esta ruta` | Es normal si no hay servicios o la ruta no coincide con ninguna regla | Despliega `ECS-services-module` o revisa `path_patterns` |
 | `503 Service Temporarily Unavailable` | Hay una regla, pero su target group no tiene tareas sanas | Revisa el servicio (ver problemas de [ECS-services-module](../ECS-services-module/README.md#problemas-frecuentes)) |
 | `curl` se queda colgado (timeout) | Tu IP no está en `alb_allowed_cidrs` | Añade tu IP o usa `0.0.0.0/0` |

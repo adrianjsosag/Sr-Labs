@@ -14,9 +14,16 @@ variable "bastion_ssh_allowed_cidrs" {
   default     = ["0.0.0.0/0"]
 }
 
-# Path to the state file of the VPC project (relative to this manifests/ directory)
-variable "vpc_state_path" {
-  description = "Path to the terraform.tfstate of the VPC project"
+# S3 bucket with the Terraform states (S3-tfstate-backend-module). Default: <division>-<environment>-tfstate-<account_id>
+variable "state_bucket" {
+  description = "S3 bucket of the Terraform states (null = name derived like S3-tfstate-backend-module)"
   type        = string
-  default     = "../../VPC-module/manifests/terraform.tfstate"
+  default     = null
+}
+
+# TESTS ONLY: directory with local <project>.tfstate files used instead of the S3 bucket
+variable "remote_state_local_dir" {
+  description = "Tests only: directory with local <project>.tfstate files (e.g. VPC-module.tfstate) instead of S3"
+  type        = string
+  default     = null
 }

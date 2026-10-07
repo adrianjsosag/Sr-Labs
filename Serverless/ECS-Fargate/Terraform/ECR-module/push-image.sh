@@ -96,9 +96,9 @@ for cmd in aws docker terraform; do
   command -v "$cmd" >/dev/null 2>&1 || die "Falta la herramienta '$cmd' en el PATH"
 done
 docker info >/dev/null 2>&1 || die "Docker no responde. ¿Está iniciado Docker (o Docker Desktop con integración WSL)?"
-[[ -f "$MANIFESTS_DIR/terraform.tfstate" ]] || die "No existe $MANIFESTS_DIR/terraform.tfstate: aplica primero ECR-module (terraform init && terraform apply en manifests/)"
+[[ -d "$MANIFESTS_DIR/.terraform" ]] || die "ECR-module no está inicializado: ejecuta 'terraform init' en $MANIFESTS_DIR (y 'terraform apply' si aún no existe)"
 
-info "Leyendo los repositorios del state de Terraform"
+info "Leyendo los repositorios del state de Terraform (S3)"
 REGISTRY="$(terraform -chdir="$MANIFESTS_DIR" output -raw registry_url 2>/dev/null)" \
   || die "No se pudo leer el output registry_url: ¿está aplicado ECR-module? (terraform apply en $MANIFESTS_DIR)"
 NAMES_JSON="$(terraform -chdir="$MANIFESTS_DIR" output -json repository_names 2>/dev/null | tr -d ' \n')" || die "No se pudo leer el output repository_names"

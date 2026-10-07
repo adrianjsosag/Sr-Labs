@@ -8,11 +8,13 @@ Además, **genera su propia llave SSH (key pair)**, con el mismo nombre que el B
 | 🧭 Ficha rápida | |
 |---|---|
 | **Paso en el despliegue** | **6** – opcional, en cualquier momento después de la VPC ([guía](../README.md#guía-de-despliegue-paso-a-paso)) |
-| **Depende de** | [`VPC-module`](../VPC-module/README.md) |
+| **Depende de** | Bucket del state ([`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md)) y [`VPC-module`](../VPC-module/README.md) |
 | **Lo usan** | Tú, para entrar por SSH a recursos privados (por ejemplo, las instancias del cluster en modo EC2) |
 | **Recursos (`plan`)** | 9 |
 | **Tiempo de despliegue** | 2–3 min |
 | **Costo principal** | La instancia EC2 `t3.micro` y su Elastic IP, por hora |
+
+> ⚠️ **Antes de desplegar este módulo debe existir el bucket S3 del state** ([`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md)): su `backend.tf` guarda el state ahí. Si no existe, `terraform init` falla con `NoSuchBucket`.
 
 > 🗺️ Vista general de toda la plataforma: [README de Terraform](../README.md).
 
@@ -72,7 +74,7 @@ Al terminar, Terraform guarda la llave privada en tu PC y también la copia al B
 | **AMI** | La "imagen" del sistema operativo con la que arranca el servidor. Aquí usamos la más reciente de Amazon Linux 2023. |
 | **Security Group** | El firewall de la instancia: define qué tráfico puede entrar y salir. |
 | **Elastic IP** | IP pública fija que se asocia a la instancia. |
-| **State (`terraform.tfstate`)** | El archivo donde Terraform anota todo lo que creó: IDs, IPs, etc. Es la "memoria" de un proyecto. Se guarda en la carpeta `manifests/` de cada proyecto. |
+| **State (`terraform.tfstate`)** | El archivo donde Terraform anota todo lo que creó: IDs, IPs, etc. Es la "memoria" de un proyecto. Se guarda en un bucket S3 (ver [`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md)). |
 | **`terraform_remote_state`** | Un *data source* que permite a un proyecto **leer los outputs del state de otro proyecto**. Así el Bastion conoce la VPC sin escribir sus IDs a mano. |
 | **Data source** | Una consulta de solo lectura: Terraform *lee* información existente, pero no crea nada. |
 | **Provisioner** | Instrucciones que Terraform ejecuta después de crear un recurso: copiar archivos, ejecutar comandos, etc. |
@@ -86,8 +88,8 @@ flowchart TB
     user(("Tú<br/>(tu PC)"))
     internet((Internet))
 
-    subgraph vpcstate["Proyecto VPC-module"]
-        tfstate[("terraform.tfstate<br/>vpc_id, public_subnets")]
+    subgraph vpcstate["State de VPC-module (bucket S3)"]
+        tfstate[("VPC-module/terraform.tfstate<br/>vpc_id, public_subnets")]
     end
 
     keypair{{"Key Pair<br/>CloudEngineering-stag-BastionHost"}}
@@ -172,7 +174,7 @@ Lo usan la instancia, el key pair y el archivo `.pem`. Así es evidente qué lla
 
 📌 **Detalles importantes:**
 - **Ciclo de vida:** `terraform destroy` borra el key pair de AWS **y** el archivo `.pem` local. Si vuelves a crear todo con `apply`, se genera una llave **nueva**; la anterior deja de servir.
-- **Copia de la llave:** la llave privada también queda guardada en `terraform.tfstate`. Si pierdes el `.pem`, se puede regenerar con `terraform apply`, siempre que el state siga existiendo. Ver [Seguridad](#seguridad).
+- **Copia de la llave:** la llave privada también queda guardada en el state (en el bucket S3). Si pierdes el `.pem`, se puede regenerar con `terraform apply`, siempre que el state siga existiendo. Ver [Seguridad](#seguridad).
 
 ### ¿Cómo viaja el tráfico?
 
@@ -187,18 +189,19 @@ El Bastion está en una **subred pública**, así que sale a Internet directamen
 
 ## ¿De qué depende? (remote state)
 
-El proyecto `VPC-module` guarda su state en `VPC-module/manifests/terraform.tfstate`. Ese archivo contiene los **outputs** de la VPC: `vpc_id`, `public_subnets`, `private_subnets`, etc.
+El proyecto `VPC-module` guarda su state en el [bucket S3](../S3-tfstate-backend-module/README.md), con la clave `VPC-module/terraform.tfstate`. Ese archivo contiene los **outputs** de la VPC: `vpc_id`, `public_subnets`, `private_subnets`, etc. El Bastion guarda el suyo en `EC2-bastion-host-module/terraform.tfstate`.
 
-En [`remote-state-datasource.tf`](manifests/remote-state-datasource.tf) este proyecto lee ese archivo:
+En [`remote-state-datasource.tf`](manifests/remote-state-datasource.tf) este proyecto lee el state de la VPC:
 
 ```hcl
 data "terraform_remote_state" "vpc" {
-  backend = "local"                 # el state de la VPC es un archivo local
-  config = {
-    path = var.vpc_state_path       # "../../VPC-module/manifests/terraform.tfstate"
-  }
+  backend = local.remote_state_backend         # "s3" (o "local" en pruebas)
+  config  = local.remote_state_config["vpc"]   # { bucket = "cloudengineering-stag-tfstate-<cuenta>",
+                                               #   key = "VPC-module/terraform.tfstate", region = "us-east-1" }
 }
 ```
+
+El nombre del bucket se calcula solo (`<división>-<entorno>-tfstate-<cuenta>`). Para pruebas sin AWS, la variable `remote_state_local_dir` hace que lea un archivo local `VPC-module.tfstate` en su lugar.
 
 Y luego usa sus valores así:
 
@@ -223,11 +226,12 @@ EC2-bastion-host-module/
 ├── README.md                          # Este documento
 └── manifests/
     ├── versions.tf                    # Versiones de Terraform y providers (aws, tls, local)
+    ├── backend.tf                     # State en el bucket S3 (clave EC2-bastion-host-module/terraform.tfstate)
     ├── generic-variables.tf           # Variables generales: región, entorno, división
     ├── local-values.tf                # Valores calculados: nombres (incluido el del Bastion) y etiquetas
     ├── remote-state-datasource.tf     # Lectura del state de la VPC
     ├── ami-datasource.tf              # Búsqueda de la AMI más reciente de Amazon Linux 2023
-    ├── ec2bastion-variables.tf        # Variables del Bastion: tipo, IPs permitidas, ruta del state
+    ├── ec2bastion-variables.tf        # Variables del Bastion: tipo, IPs permitidas, bucket del state
     ├── ec2bastion-keypair.tf          # Creación del key pair y del archivo .pem
     ├── ec2bastion-securitygroups.tf   # Firewall (Security Group y sus reglas)
     ├── ec2bastion-instance.tf         # La instancia EC2 (módulo oficial)
@@ -294,7 +298,8 @@ Los valores **por defecto** están en los archivos `*-variables.tf`. Los valores
 |---|---|---|---|
 | `instance_type` | texto | `t3.micro` | Tamaño del servidor. `t3.micro` es suficiente para un bastion |
 | `bastion_ssh_allowed_cidrs` | lista | `["0.0.0.0/0"]` | IPs que pueden conectarse por SSH. **Recomendado: solo tu IP**, por ejemplo `["203.0.113.10/32"]` |
-| `vpc_state_path` | texto | `../../VPC-module/manifests/terraform.tfstate` | Ruta al state de la VPC (relativa a `manifests/`) |
+| `state_bucket` | texto | `null` → `cloudengineering-stag-tfstate-<account_id>` | Bucket S3 con el state de la VPC. Solo hace falta si el bucket tiene otro nombre |
+| `remote_state_local_dir` | texto | `null` | **Solo pruebas:** carpeta con states ficticios (`VPC-module.tfstate`) que se leen en lugar del bucket |
 
 > ℹ️ El nombre de la llave **no es una variable**: siempre es igual al nombre del Bastion (`local.bastion_name`).
 
@@ -334,13 +339,13 @@ Todos llevan además las etiquetas `owners` y `environment`, igual que la VPC.
 cd Serverless/ECS-Fargate/Terraform/EC2-bastion-host-module/manifests
 terraform init
 terraform validate
-terraform plan        # necesita el state de la VPC (VPC-module/manifests/terraform.tfstate)
+terraform plan        # necesita el bucket del state y el state de la VPC en él
 ```
 
-Si la VPC todavía no existe, puedes probarlo con un **state ficticio** que tenga los outputs `vpc_id` y `public_subnets`. Ver [cómo hacerlo](../README.md#probar-sin-crear-nada):
+Si el bucket o la VPC todavía no existen, puedes probarlo con un `backend_override.tf` local y un **state ficticio** `VPC-module.tfstate` que tenga los outputs `vpc_id` y `public_subnets`. Ver [cómo hacerlo](../README.md#probar-sin-crear-nada):
 
 ```bash
-terraform plan -var vpc_state_path=/ruta/a/vpc-fake.tfstate
+terraform plan -var remote_state_local_dir=/ruta/a/states-ficticios
 ```
 
 ✅ **Resultado verificado** (state de la VPC simulado): `Plan: 9 to add, 0 to change, 0 to destroy.`
@@ -353,7 +358,7 @@ terraform plan -var vpc_state_path=/ruta/a/vpc-fake.tfstate
 
 ### Requisitos previos
 
-1. **La VPC ya debe estar creada.** Ejecuta `terraform apply` en `VPC-module/manifests/` primero. Sin el archivo `terraform.tfstate` de la VPC, este proyecto no puede saber dónde crearse.
+1. **El bucket del state y la VPC ya deben estar creados** ([`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md) y `VPC-module`). Sin el state de la VPC en el bucket, este proyecto no puede saber dónde crearse.
 2. **Terraform 1.16 o superior.** En este equipo está instalado en WSL; compruébalo con `terraform version`.
 3. **Credenciales de AWS** (perfil `default` o `AWS_PROFILE`). Compruébalas con `aws sts get-caller-identity`.
 4. *(Recomendado)* Pon tu IP pública en `bastion_ssh_allowed_cidrs` dentro de `ec2bastion.auto.tfvars`. Puedes averiguarla con `curl -s https://checkip.amazonaws.com`.
@@ -368,7 +373,7 @@ cd Serverless/ECS-Fargate/Terraform/EC2-bastion-host-module/manifests
 
 | # | Comando | Qué hace |
 |---|---|---|
-| 1 | `terraform init` | Descarga los providers (`aws`, `tls`, `local`) y los módulos EC2 y key-pair |
+| 1 | `terraform init` | Descarga los providers (`aws`, `tls`, `local`) y los módulos EC2 y key-pair, y conecta con el state en S3 (`EC2-bastion-host-module/terraform.tfstate`) |
 | 2 | `terraform validate` | Comprueba que el código no tenga errores |
 | 3 | `terraform plan` | Lee el state de la VPC y **muestra** lo que se va a crear, sin crearlo |
 | 4 | `terraform apply` | Crea los recursos. Escribe `yes` para confirmar |
@@ -427,12 +432,12 @@ ssh -i private-key/CloudEngineering-stag-BastionHost.pem -J ec2-user@<ec2_bastio
 
 - **Restringe el SSH.** El valor por defecto `0.0.0.0/0` permite intentos de conexión desde cualquier lugar de Internet. Cámbialo a tu IP con `/32`.
 - **Nunca subas el `.pem` a git.** El `.gitignore` de la raíz del proyecto ya ignora `*.pem` y `private-key/`.
-- **La llave privada queda guardada en el `terraform.tfstate`**, sin cifrar. Esto ocurre siempre que Terraform genera una llave. Quien tenga el state tiene acceso al Bastion, así que protégelo igual que el `.pem`. En producción:
+- **La llave privada queda guardada en el state.** Esto ocurre siempre que Terraform genera una llave. El state está en el bucket S3, cifrado (SSE-S3), pero quien pueda leer el bucket tiene acceso al Bastion: restringe ese acceso igual que el `.pem`. En producción:
   - Genera la llave fuera de Terraform y pasa solo la llave pública (`public_key`).
-  - Usa un backend remoto cifrado (por ejemplo S3 con KMS y acceso restringido).
+  - Cifra el bucket con una llave KMS propia y limita quién puede leerlo.
   - O, mejor, elimina las llaves y usa AWS Systems Manager Session Manager.
 - **La llave queda copiada en el Bastion** (`/tmp/CloudEngineering-stag-BastionHost.pem`). Es cómodo para el laboratorio, pero cualquiera con acceso al Bastion podría usarla. En producción usa ProxyJump o AWS Systems Manager Session Manager.
-- **El state contiene otros datos sensibles,** como IPs e IDs. Trata los archivos `terraform.tfstate` como información privada: no los subas a git (ya están en el `.gitignore`) ni los guardes en carpetas sincronizadas.
+- **El state contiene otros datos sensibles,** como IPs e IDs. Trata el bucket del state como información privada y nunca descargues un `.tfstate` a git (ya está en el `.gitignore`) ni a carpetas sincronizadas.
 - **IMDSv2 está activado por defecto en el módulo EC2** (`http_tokens = required`). Esto protege los metadatos de la instancia.
 
 ---
@@ -454,7 +459,8 @@ Al terminar el laboratorio ejecuta `terraform destroy` para no seguir pagando.
 
 | Síntoma | Causa probable | Solución |
 |---|---|---|
-| `Unable to find remote state` | La VPC no está aplicada, o `vpc_state_path` es incorrecta | Aplica `VPC-module` primero, o corrige la ruta |
+| `Unable to find remote state` | La VPC no está aplicada, o el bucket no es el esperado | Aplica `VPC-module` primero. Si el bucket tiene otro nombre, pásalo con `state_bucket` |
+| `NoSuchBucket` / `S3 bucket does not exist` en `terraform init` | Aún no existe el bucket del state, o el `bucket` de `backend.tf` no coincide | Aplica antes [`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md) |
 | `Unsupported attribute: This object does not have an attribute named "..."` | Se intenta leer un output que la VPC no expone | Añade el output en `VPC-module/manifests/vpc-outputs.tf` y vuelve a aplicar la VPC |
 | `InvalidKeyPair.Duplicate` | Ya existe en AWS un key pair con el nombre `CloudEngineering-stag-BastionHost`, creado fuera de este state | Bórralo en la consola (EC2 → Key Pairs) o cambia `environment`/`business_divsion` |
 | Borraste el `.pem` local por error | El archivo se gestiona con Terraform | Ejecuta `terraform apply`: lo vuelve a escribir desde el state |

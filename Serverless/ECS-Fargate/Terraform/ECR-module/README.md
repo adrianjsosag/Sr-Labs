@@ -7,11 +7,13 @@ Incluye el script [`push-image.sh`](push-image.sh), que **construye o copia, sub
 | 🧭 Ficha rápida | |
 |---|---|
 | **Paso en el despliegue** | **4** – crear y **subir las imágenes** antes de los servicios ([guía](../README.md#guía-de-despliegue-paso-a-paso)) |
-| **Depende de** | Ningún otro módulo |
+| **Depende de** | Bucket del state ([`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md)) |
 | **Lo usan** | [`ECS-services-module`](../ECS-services-module/README.md) (servicios con `ecr_repository`) y el script `push-image.sh` |
 | **Recursos (`plan`)** | 2 por repositorio (4 hoy) |
 | **Tiempo de despliegue** | ~1 min + 1–2 min por imagen subida |
 | **Costo principal** | Almacenamiento de imágenes por GB (mínimo) |
+
+> ⚠️ **Antes de desplegar este módulo debe existir el bucket S3 del state** ([`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md)): su `backend.tf` guarda el state ahí. Si no existe, `terraform init` falla con `NoSuchBucket`.
 
 > 🗺️ Vista general de toda la plataforma: [README de Terraform](../README.md).
 
@@ -147,14 +149,14 @@ module "ecr" {
 
 ## ¿De qué depende? (remote state)
 
-**No depende de ningún otro módulo:** se puede crear en cualquier momento. Lo que importa es el orden respecto a los servicios: el ECR debe estar aplicado **y con las imágenes subidas** antes de desplegar un servicio que use `ecr_repository`.
+**Solo necesita el [bucket del state](../S3-tfstate-backend-module/README.md)**, donde guarda su state (`ECR-module/terraform.tfstate`): se puede crear en cualquier momento después de él. Lo que importa es el orden respecto a los servicios: el ECR debe estar aplicado **y con las imágenes subidas** antes de desplegar un servicio que use `ecr_repository`.
 
 Lo usan:
 
 | Quién | Qué lee |
 |---|---|
 | [`push-image.sh`](push-image.sh) | `registry_url` y `repository_names`, con `terraform output` |
-| Servicios de [`ECS-services-module`](../ECS-services-module/README.md) con `ecr_repository` | `repository_urls` y `repository_names` del state (variable `ecr_state_path`), y en AWS la imagen y su digest |
+| Servicios de [`ECS-services-module`](../ECS-services-module/README.md) con `ecr_repository` | `repository_urls` y `repository_names` de su state en S3 (`ECR-module/terraform.tfstate`), y en AWS la imagen y su digest |
 
 ---
 
@@ -166,6 +168,7 @@ ECR-module/
 ├── push-image.sh                # construir/copiar → tag → push → escaneo → cómo usarla
 └── manifests/
     ├── versions.tf              # Terraform + provider AWS
+    ├── backend.tf               # State en el bucket S3 (clave ECR-module/terraform.tfstate)
     ├── generic-variables.tf     # región, entorno, división
     ├── terraform.tfvars         # us-east-1 / stag / CloudEngineering
     ├── local-values.tf          # name, common_tags, repo_prefix (minúsculas)
@@ -251,8 +254,9 @@ terraform plan
 
 ### Requisitos previos
 
-1. **Credenciales de AWS** (perfil `default` o `AWS_PROFILE`). Compruébalas con `aws sts get-caller-identity`.
-2. **Para subir imágenes después:** Docker funcionando y los [permisos del script](#permisos-necesarios).
+1. **El bucket del state creado** ([`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md)): es lo primero que se despliega.
+2. **Credenciales de AWS** (perfil `default` o `AWS_PROFILE`). Compruébalas con `aws sts get-caller-identity`.
+3. **Para subir imágenes después:** Docker funcionando y los [permisos del script](#permisos-necesarios).
 
 ### Pasos
 
@@ -323,7 +327,7 @@ aws ecr describe-image-scan-findings --repository-name cloudengineering-stag/ngi
 - **Terminal:** WSL/Ubuntu (bash).
 - **Herramientas:** AWS CLI v2 y Terraform.
 - **Docker funcionando:** Docker Engine en WSL o Docker Desktop con la integración WSL activada.
-- **ECR ya aplicado:** el script lee los repositorios del `terraform.tfstate` de `ECR-module/manifests` (con `terraform output`).
+- **ECR aplicado e inicializado en tu PC** (`terraform init` en `ECR-module/manifests`): el script lee los repositorios con `terraform output`, desde el state en S3.
 
 ### Permisos necesarios
 
@@ -365,7 +369,7 @@ Política mínima, limitada a los repositorios del proyecto (cambia `<ACCOUNT_ID
 }
 ```
 
-> ℹ️ La descarga de la imagen de origen desde `public.ecr.aws` es anónima, y `terraform output` lee el state local: no necesitan permisos de AWS. Si tu usuario tiene `AmazonEC2ContainerRegistryPowerUser` o es administrador, ya tiene todo lo necesario.
+> ℹ️ La descarga de la imagen de origen desde `public.ecr.aws` es anónima. `terraform output` lee el state del bucket S3: necesitas además `s3:ListBucket` en el bucket y `s3:GetObject` sobre `ECR-module/terraform.tfstate`. Si tu usuario tiene `AmazonEC2ContainerRegistryPowerUser` o es administrador, ya tiene todo lo necesario.
 
 ### Uso
 
@@ -544,7 +548,8 @@ La política de ciclo de vida (10 imágenes por repositorio y borrado de las im�
 
 | Síntoma | Causa probable | Solución |
 |---|---|---|
-| `ERROR No existe …/ECR-module/manifests/terraform.tfstate` | El ECR no está aplicado | `terraform init && terraform apply` en `ECR-module/manifests` |
+| `ERROR ECR-module no está inicializado` | Falta `terraform init` en `ECR-module/manifests` (por ejemplo, en un clon nuevo del repositorio) | `terraform init` en `ECR-module/manifests` (y `terraform apply` si el ECR aún no existe) |
+| `NoSuchBucket` / `S3 bucket does not exist` en `terraform init` | Aún no existe el bucket del state, o el `bucket` de `backend.tf` no coincide | Aplica antes [`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md) |
 | `ERROR No se pudo leer el output registry_url` | El state del ECR está vacío o incompleto (por ejemplo, un `apply` que falló) | Repite `terraform apply` en `ECR-module/manifests` |
 | `ERROR El repositorio 'x' no existe en ECR-module` | Falta en `ecr.auto.tfvars` | Añádelo y ejecuta `terraform apply` |
 | `ERROR El tag '1.0.0' ya existe … IMMUTABLE` | Esa versión ya se subió | Usa una versión nueva (`1.0.1`). Si quieres la misma imagen, reutiliza el tag existente en el servicio |
