@@ -710,6 +710,7 @@ flowchart LR
 | Ponerlo en marcha la primera vez (OIDC, environment, variables, protección de `main`) | [Puesta en marcha](../../../.github/README.md#puesta-en-marcha-una-sola-vez) |
 | Desplegar un cambio (rama → PR → plan → merge → aprobación) | [Flujo diario](../../../.github/README.md#flujo-diario) |
 | Destruir un servicio o re-desplegar un proyecto a mano | [Workflow manual](../../../.github/README.md#workflow-manual) |
+| Comprobar si AWS coincide con el código (drift) | [Detección de drift](../../../.github/README.md#detección-de-drift) |
 | Entender o modificar el workflow | [Los jobs en detalle](../../../.github/README.md#los-jobs-en-detalle) y [Mantenimiento](../../../.github/README.md#mantenimiento) |
 
 ---
@@ -980,7 +981,7 @@ Las 6 mejoras con **mayor impacto en seguridad** para empezar:
 | **Postura y cumplimiento continuo** | No se mide el cumplimiento | **AWS Security Hub** (estándares CIS y *AWS Foundational Security Best Practices*) + **AWS Config** con reglas administradas. Revisión periódica de hallazgos | `security-baseline` | 🟠 | M | CIS, WA-SEC 4 |
 | **Logs de red y de acceso** | Sin VPC Flow Logs ni logs de acceso del ALB | VPC Flow Logs (`enable_flow_log` del módulo VPC) y `access_logs` del ALB a S3 cifrado, con retención según política | `VPC-module`, `ALB-module` | 🟠 | S | CIS 3.x, WA-SEC 4 |
 | **Observabilidad de aplicaciones** | Container Insights `disabled`, sin alarmas ni dashboards. Retención de logs fija en 7 días | Container Insights, **alarmas CloudWatch + SNS** (5xx del ALB, `UnHealthyHostCount`, CPU/memoria, tareas detenidas), dashboard por servicio, trazas con **X-Ray/OpenTelemetry**, retención configurable | `ECS-cluster-module`, `ECS-services-module` | 🟠 | M | WA-OPS, REL |
-| **Detección de drift** | Los cambios manuales en la consola pasan desapercibidos | `terraform plan -detailed-exitcode` programado (diario) en el pipeline, con alerta si hay diferencias | Pipeline | 🟠 | S | WA-OPS, SSDF |
+| ✅ **Detección de drift** *(implementado)* | **Hecho:** workflow manual [`check-terraform-drift.yml`](../../../.github/workflows/check-terraform-drift.yml): `terraform plan -detailed-exitcode` de solo lectura en cada proyecto del pipeline, tabla de estados (sin drift, drift, no desplegado, falta una dependencia, error) e **issue** que se abre o actualiza si hay diferencias y se cierra solo. Ver [Detección de drift](../../../.github/README.md#detección-de-drift) | **Pendiente:** si se quiere una alerta sin intervención, ejecutarlo de forma programada (`schedule`); revisar también el bucket del state, OIDC y el Bastion | `.github/workflows/` | 🟠 | S | WA-OPS, SSDF |
 | **Respuesta a incidentes** | No hay procedimientos | Runbooks (credencial filtrada, imagen vulnerable, tarea comprometida: aislar SG, *snapshot*, rotar secretos) y automatizaciones con EventBridge/SSM Automation | Documentación + `security-baseline` | 🟢 | M | WA-SEC 10, SSDF RV |
 | **FinOps** | Sin presupuestos ni visibilidad del costo de cada cambio | **AWS Budgets** con alertas, **Infracost** en el PR, apagado programado del laboratorio (servicios a 0 tareas fuera de horario), Fargate Spot y **Graviton** (`runtime_platform` ARM64) | Pipeline + servicios | 🟢 | S | WA-COST |
 
@@ -989,7 +990,7 @@ Las 6 mejoras con **mayor impacto en seguridad** para empezar:
 ```mermaid
 flowchart LR
     F1["Fase 1 – Fundamentos<br/>(semanas 1-2)<br/>• ✅ State S3 cifrado + bloqueo (hecho)<br/>• Pre-commit: checkov, tflint, gitleaks<br/>• Restringir CIDRs / quitar SSH abierto<br/>• CloudTrail + GuardDuty<br/>• HTTPS con ACM"]
-    F2["Fase 2 – Pipeline seguro<br/>(semanas 3-6)<br/>• ✅ CI/CD con OIDC y aprobaciones (hecho)<br/>• Policy as Code (OPA/Conftest)<br/>• ✅ ECR + escaneo + digest (hecho)<br/>• Inspector + KMS en ECR<br/>• Secrets Manager<br/>• SSM en lugar de Bastion/llaves<br/>• terraform test + alarmas"]
+    F2["Fase 2 – Pipeline seguro<br/>(semanas 3-6)<br/>• ✅ CI/CD con OIDC y aprobaciones (hecho)<br/>• ✅ Detección de drift (hecho)<br/>• Policy as Code (OPA/Conftest)<br/>• ✅ ECR + escaneo + digest (hecho)<br/>• Inspector + KMS en ECR<br/>• Secrets Manager<br/>• SSM en lugar de Bastion/llaves<br/>• terraform test + alarmas"]
     F3["Fase 3 – Madurez<br/>(trimestre)<br/>• Multi-cuenta + SCPs<br/>• WAF + logs de acceso + Flow Logs<br/>• SBOM y firma de imágenes<br/>• DAST con ZAP<br/>• Security Hub + Config<br/>• VPC endpoints, blue/green<br/>• Cambio de modo nativo (sin script)"]
     F1 --> F2 --> F3
 ```

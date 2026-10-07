@@ -12,7 +12,8 @@ Este documento sirve para **usarlo** (puesta en marcha, flujo diario, workflow m
 | **Cuándo se ejecuta** | En cada Pull Request a `main`, en cada merge a `main` y a mano (*Run workflow*) |
 | **Credenciales de AWS** | **OIDC**, sin claves guardadas: rol de **plan** (solo lectura) y rol de **apply** (solo con aprobación). Los crea [`GitHub-OIDC-module`](../Serverless/ECS-Fargate/Terraform/GitHub-OIDC-module/README.md) |
 | **Aprobación** | Environment de GitHub **`production`**, con revisores obligatorios |
-| **Archivos** | [`workflows/terraform.yml`](workflows/terraform.yml) y [`scripts/terraform-changed-projects.sh`](scripts/terraform-changed-projects.sh) |
+| **Detección de drift** | Workflow aparte, **solo manual**: compara AWS con el código de `main` sin cambiar nada y abre un issue si hay diferencias. Ver [Detección de drift](#detección-de-drift) |
+| **Archivos** | [`workflows/terraform.yml`](workflows/terraform.yml), [`workflows/check-terraform-drift.yml`](workflows/check-terraform-drift.yml) y [`scripts/terraform-changed-projects.sh`](scripts/terraform-changed-projects.sh) |
 | **Nunca toca** | El bucket del state (`S3-tfstate-backend-module`), sus propios permisos (`GitHub-OIDC-module`) ni el Bastion (`EC2-bastion-host-module`): se gestionan desde tu PC |
 
 > 🗺️ Vista general de la plataforma: [README de Terraform](../Serverless/ECS-Fargate/Terraform/README.md).
@@ -34,10 +35,11 @@ Este documento sirve para **usarlo** (puesta en marcha, flujo diario, workflow m
 11. 🚀 [Puesta en marcha (una sola vez)](#puesta-en-marcha-una-sola-vez)
 12. 📲 [Flujo diario](#flujo-diario)
 13. 🖐️ [Workflow manual](#workflow-manual)
-14. 🛠️ [Mantenimiento](#mantenimiento)
-15. 🧪 [Cómo probar cambios del pipeline](#cómo-probar-cambios-del-pipeline)
-16. ⚠️ [Limitaciones conocidas](#limitaciones-conocidas)
-17. 🧰 [Problemas frecuentes](#problemas-frecuentes)
+14. 🔎 [Detección de drift](#detección-de-drift)
+15. 🛠️ [Mantenimiento](#mantenimiento)
+16. 🧪 [Cómo probar cambios del pipeline](#cómo-probar-cambios-del-pipeline)
+17. ⚠️ [Limitaciones conocidas](#limitaciones-conocidas)
+18. 🧰 [Problemas frecuentes](#problemas-frecuentes)
 
 ---
 
@@ -66,7 +68,7 @@ El pipeline aplica el modelo **GitOps**: **git es la única fuente de verdad**. 
 
 | Término | Qué significa en palabras simples |
 |---|---|
-| **Workflow** | Un archivo YAML en `.github/workflows/` que describe una automatización. Aquí: `terraform.yml`. |
+| **Workflow** | Un archivo YAML en `.github/workflows/` que describe una automatización. Aquí: `terraform.yml` (despliegue) y `check-terraform-drift.yml` (detección de drift). |
 | **Job** | Un bloque de trabajo del workflow que corre en su propia máquina. Aquí: `detect`, `checks`, `plan` y `apply`. |
 | **Step** | Un paso dentro de un job: un comando o una *action* reutilizable. |
 | **Runner** | La máquina temporal (Ubuntu) que GitHub crea para cada job y destruye al terminar. |
@@ -118,9 +120,10 @@ Sr-Labs/
 ├── .github/
 │   ├── README.md                               # este documento
 │   ├── workflows/
-│   │   └── terraform.yml                       # el workflow: detect → checks → plan → apply
+│   │   ├── terraform.yml                       # el workflow: detect → checks → plan → apply
+│   │   └── check-terraform-drift.yml           # detección de drift (manual): list → drift → report
 │   └── scripts/
-│       └── terraform-changed-projects.sh       # qué proyectos cambiaron y en qué orden
+│       └── terraform-changed-projects.sh       # qué proyectos cambiaron y en qué orden (lo usan los dos)
 └── Serverless/ECS-Fargate/Terraform/
     ├── S3-tfstate-backend-module/              # bucket del state (a mano, antes que todo)
     ├── GitHub-OIDC-module/                     # proveedor OIDC + roles plan/apply (a mano)
@@ -130,6 +133,7 @@ Sr-Labs/
 | Archivo | Qué hace |
 |---|---|
 | [`workflows/terraform.yml`](workflows/terraform.yml) | Define cuándo se ejecuta, los 4 jobs, sus permisos y el orden de despliegue |
+| [`workflows/check-terraform-drift.yml`](workflows/check-terraform-drift.yml) | Comprueba, a mano y sin cambiar nada, si AWS coincide con el código. Ver [Detección de drift](#detección-de-drift) |
 | [`scripts/terraform-changed-projects.sh`](scripts/terraform-changed-projects.sh) | Recibe los archivos cambiados (`git diff`) y devuelve los proyectos a planificar y aplicar, ordenados. Ver [Detección de proyectos](#detección-de-proyectos) |
 | [`GitHub-OIDC-module`](../Serverless/ECS-Fargate/Terraform/GitHub-OIDC-module/README.md) | Crea los roles IAM que asume el pipeline. **No** lo aplica el pipeline |
 
@@ -835,7 +839,63 @@ Siempre muestra primero el plan (con `-destroy` si la acción es `destroy`). Par
 
 **Cuándo usarlo:**
 - **Destruir** un servicio o un módulo.
-- **Volver a aplicar** un proyecto sin cambios de código, por ejemplo para corregir un cambio hecho a mano en la consola (*drift*).
+- **Volver a aplicar** un proyecto sin cambios de código, por ejemplo para corregir un cambio hecho a mano en la consola (*drift*). Para saber **qué** proyectos tienen drift, ver [Detección de drift](#detección-de-drift).
+
+---
+
+## Detección de drift
+
+Hay **drift** cuando lo que existe en AWS ya no coincide con el código de `main`. Por ejemplo: alguien cambió una regla de un security group en la consola, borró un recurso o hay código en `main` que nunca se aplicó.
+
+El workflow [`check-terraform-drift.yml`](workflows/check-terraform-drift.yml) lo detecta. Ejecuta `terraform plan` en cada proyecto con el **rol de plan (solo lectura)**. **Nunca cambia nada en AWS.**
+
+### Cómo lanzarlo
+
+Solo se ejecuta **a mano**: *Actions → Check Terraform drift → Run workflow*, con la rama **`main`** seleccionada. No tiene parámetros: revisa siempre **todos** los proyectos que gestiona el pipeline.
+
+> ⚠️ **Desde otra rama se detiene** con un error claro. El rol de plan solo confía en `main` y en los PR, y lo que tiene sentido es comparar AWS con el código de `main`.
+
+### Cómo funciona
+
+```mermaid
+flowchart LR
+    list["list<br/>todos los proyectos<br/>(mismo script, mismo orden)"] --> drift["drift<br/>matrix: 1 plan por proyecto<br/>(rol plan, -detailed-exitcode)"]
+    drift --> report["report<br/>tabla + issue<br/>run en rojo si hay problemas"]
+```
+
+| Job | Qué hace |
+|---|---|
+| `list` | Pasa al [script de detección](#detección-de-proyectos) **todos** los archivos de la plataforma (`git ls-files`), no solo los cambiados. Así obtiene todos los proyectos que gestiona el pipeline, con las mismas exclusiones y en el mismo orden |
+| `drift` | Un job por proyecto, en paralelo. Ejecuta `terraform plan -detailed-exitcode`, que termina con **0** (sin cambios), **1** (error) o **2** (hay diferencias). Cuenta los recursos del state y clasifica el resultado. El plan completo queda en el resumen del job, para ver **qué** difiere |
+| `report` | Junta los resultados en una tabla en el orden de la plataforma, gestiona el issue y deja el run en **rojo** si algún proyecto no está "sin drift" |
+
+### Estados posibles
+
+| Estado | Cuándo | Qué hacer |
+|---|---|---|
+| ✅ **sin drift** | El plan no tiene cambios (código 0) | Nada |
+| ⚠️ **drift** | El plan tiene cambios (código 2) y el state tiene recursos | Revisa el plan en el run. Si el cambio se hizo a mano en la consola, vuelve a aplicar el código ([workflow manual](#workflow-manual) → `apply`). Si el cambio debe quedarse, llévalo al código con un PR |
+| 🆕 **no desplegado** | El plan quiere crear todo: el state está vacío | Despliégalo con el [workflow manual](#workflow-manual), en orden: VPC → ALB → cluster → ECR → servicios |
+| 🔗 **falta una dependencia** | El plan falla con `Unable to find remote state` | Despliega antes el proyecto del que depende |
+| ❌ **error** | El plan falla por otro motivo, por ejemplo una imagen que no está en el ECR. El detalle muestra el primer `Error:` | Revisa el log del job |
+
+### El issue de drift
+
+- **Hay problemas:** se crea un issue **"Drift de Terraform detectado"** con la tabla, qué hacer en cada caso y el enlace al run. Si ya hay uno abierto, se **actualiza**; nunca se duplica. El workflow lo reconoce por un marcador oculto (`<!-- terraform-drift -->`).
+- **Todo sin drift:** si había un issue abierto, el workflow lo **comenta y lo cierra** solo.
+
+### Qué no revisa
+
+Lo mismo que el pipeline nunca toca: `S3-tfstate-backend-module`, `GitHub-OIDC-module` y `EC2-bastion-host-module`. Revísalos desde tu PC con `terraform plan`.
+
+### Requisitos y permisos
+
+- Las mismas variables del repositorio que el pipeline: `AWS_REGION` y `AWS_PLAN_ROLE_ARN`. Si falta el rol, el workflow avisa y no revisa nada. **No hace falta tocar el módulo OIDC.**
+- Permisos del token de GitHub: `contents: read`; `id-token: write` (solo el job `drift`) e `issues: write` (solo el job `report`).
+- Los resultados por proyecto se guardan como artefactos (`drift-<proyecto>`) durante 7 días.
+- `concurrency: terraform-drift`: una revisión a la vez.
+
+> 💡 **Si hay un `apply` en curso**, cada plan espera hasta 5 minutos a que se libere el bloqueo del state (`-lock-timeout=5m`). Lánzalo mejor cuando no haya despliegues: a mitad de un `apply` verías diferencias que solo son temporales.
 
 ---
 

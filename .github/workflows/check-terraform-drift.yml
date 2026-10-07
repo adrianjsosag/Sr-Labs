@@ -1,0 +1,297 @@
+# =============================================================================
+# Detección de drift de Terraform – Plataforma ECS (Serverless/ECS-Fargate/Terraform)
+# Archivo: .github/workflows/check-terraform-drift.yml
+# =============================================================================
+# QUÉ HACE
+#   Comprueba si lo que hay desplegado en AWS coincide con el código de la rama main.
+#   NUNCA cambia nada: solo ejecuta "terraform plan" con el rol de SOLO LECTURA.
+#
+#   Para cada proyecto que gestiona el pipeline (VPC, ALB, cluster, ECR y servicios) clasifica:
+#     ✅ sin-drift          AWS coincide con el código (plan sin cambios)
+#     ⚠️ drift              hay diferencias: alguien cambió algo en la consola, o hay código sin aplicar
+#     🆕 no-desplegado      el proyecto no tiene state: nunca se desplegó (o se destruyó)
+#     🔗 falta-dependencia  no se puede revisar porque falta el state de un proyecto del que depende
+#     ❌ error              el plan falló por otro motivo (por ejemplo, una imagen que no está en el ECR)
+#
+# CUÁNDO SE EJECUTA
+#   - Solo a mano: Actions → Check Terraform drift → Run workflow, con la rama "main" seleccionada.
+#     El rol de plan solo confía en main (y en los pull requests): desde otra rama no habría credenciales.
+#     Además, lo correcto es comparar AWS con el código de main.
+#
+# RESULTADO
+#   - Tabla en el resumen del run (pestaña Summary).
+#   - Un issue "Drift de Terraform detectado" en GitHub: se crea si hay problemas, se actualiza en cada
+#     ejecución mientras sigan, y se cierra solo cuando todo vuelve a estar sin drift.
+#   - El run termina en ROJO si algún proyecto no está "sin-drift".
+#
+# QUÉ NO REVISA
+#   - S3-tfstate-backend-module, GitHub-OIDC-module y EC2-bastion-host-module (se gestionan a mano).
+#
+# REQUISITOS: los mismos que el pipeline de despliegue (terraform.yml): variables del repositorio
+#   AWS_REGION y AWS_PLAN_ROLE_ARN. El rol de plan ya confía en la rama main (sub ref:refs/heads/main).
+# DOCUMENTACIÓN: .github/README.md#detección-de-drift
+# =============================================================================
+name: "Check Terraform drift"          # nombre que aparece en la pestaña Actions
+
+on:
+  workflow_dispatch:                   # solo a mano (sin parámetros), desde la rama main
+
+permissions:                           # por defecto el token de GitHub solo lee el código
+  contents: read
+
+# Una revisión de drift a la vez; si se lanza otra mientras corre, espera (no se cancela).
+concurrency:
+  group: terraform-drift
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: "1.16.5"                 # la misma versión que el pipeline de despliegue
+  TF_ROOT: Serverless/ECS-Fargate/Terraform
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Qué proyectos hay que revisar: TODOS los que gestiona el pipeline, en orden
+  # ---------------------------------------------------------------------------
+  list:
+    name: Listar proyectos
+    runs-on: ubuntu-latest
+    outputs:
+      projects: ${{ steps.list.outputs.plan }}             # JSON [{name, dir}, ...]
+      has_projects: ${{ steps.list.outputs.has_plan }}     # "true" si hay alguno
+    steps:
+      - name: Solo desde la rama main
+        run: |
+          # el rol de plan no confía en otras ramas: se corta aquí con un mensaje claro
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::Lanza este workflow desde la rama main (seleccionada: $GITHUB_REF_NAME)."
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Todos los proyectos de la plataforma
+        id: list
+        run: |
+          # Se pasan al script de detección TODOS los archivos de la plataforma (no solo los cambiados):
+          # así devuelve todos los proyectos que gestiona el pipeline, con las mismas reglas y el mismo
+          # orden (ignora el bucket del state, OIDC y el Bastion)
+          git ls-files "$TF_ROOT" | .github/scripts/terraform-changed-projects.sh | tee projects.json
+          {
+            echo "### Proyectos a revisar"
+            echo '```json'; jq '.plan | map(.name)' projects.json; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Aviso si falta la configuración
+        env:
+          PLAN_ROLE: ${{ vars.AWS_PLAN_ROLE_ARN }}
+        run: |
+          # sin el rol de plan no hay credenciales de AWS: la revisión no se puede hacer
+          if [[ -z "$PLAN_ROLE" ]]; then
+            msg="Faltan las variables del repositorio AWS_PLAN_ROLE_ARN / AWS_REGION: no se puede revisar el drift. Ver la puesta en marcha del pipeline en .github/README.md."
+            echo "::warning::$msg"; echo "> ⚠️ $msg" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # 2. Un plan de solo lectura por proyecto (en paralelo)
+  # ---------------------------------------------------------------------------
+  drift:
+    name: drift · ${{ matrix.project.name }}
+    needs: list
+    if: needs.list.outputs.has_projects == 'true' && vars.AWS_PLAN_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write                  # token OIDC → credenciales del rol de plan (solo lectura)
+    strategy:
+      fail-fast: false                 # cada proyecto se revisa aunque otro falle
+      matrix:
+        project: ${{ fromJSON(needs.list.outputs.projects) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false     # sin wrapper: los códigos de salida llegan tal cual
+      - name: Credenciales temporales de AWS (rol de plan)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: gha-drift-${{ github.run_id }}   # nombre visible en CloudTrail
+
+      - name: terraform plan (solo lectura) y clasificación
+        env:
+          DIR: ${{ matrix.project.dir }}
+          NAME: ${{ matrix.project.name }}
+        run: |
+          # El job NO falla por drift: guarda el resultado y el job "report" decide al final.
+          set +e
+          terraform -chdir="$DIR" init -input=false > init.log 2>&1
+          init_code=$?
+          # ¿Cuántos recursos tiene el state? 0 = el proyecto no está desplegado
+          resources=0
+          if [[ $init_code -eq 0 ]]; then
+            resources=$(terraform -chdir="$DIR" state list 2>/dev/null | wc -l)
+            # -detailed-exitcode: 0 sin cambios, 1 error, 2 hay diferencias. -lock-timeout espera si hay un apply en curso
+            terraform -chdir="$DIR" plan -lock-timeout=5m -no-color -detailed-exitcode > plan.log 2>&1
+            code=$?
+          else
+            cp init.log plan.log; code=1
+          fi
+          set -e
+
+          # Clasificación del resultado
+          # "|| true": si el plan falló no hay línea "Plan:" y grep no debe tumbar el paso (pipefail)
+          summary=$(grep -E '^(Plan:|No changes\.)' plan.log | tail -n 1 || true)
+          if [[ $code -eq 0 ]]; then
+            status="sin-drift"
+          elif [[ $code -eq 2 && $resources -eq 0 ]]; then
+            status="no-desplegado"            # el plan quiere crearlo todo: no hay nada en AWS
+          elif [[ $code -eq 2 ]]; then
+            status="drift"                    # hay recursos y el plan quiere cambiar algo
+          elif grep -q 'Unable to find remote state' plan.log; then
+            status="falta-dependencia"        # falta el state de un proyecto del que depende
+            summary="Falta desplegar un proyecto del que depende (ver el log del job)"
+          else
+            status="error"
+            summary=$(grep -m1 -E 'Error:' plan.log | sed 's/^[│ ]*//' || true)
+            [[ -z "$summary" ]] && summary="El plan falló (ver el log del job)"
+          fi
+          echo "$NAME → $status ($summary)"
+
+          # Resultado para el job "report" (un JSON por proyecto, como artefacto)
+          mkdir -p result
+          jq -n --arg name "$NAME" --arg status "$status" --arg summary "$summary" --argjson resources "$resources" \
+            '{name: $name, status: $status, summary: $summary, resources: $resources}' > "result/$NAME.json"
+
+          # Resumen del job con el plan completo plegado (para ver QUÉ difiere)
+          {
+            echo "### $NAME: \`$status\`"
+            echo "**$summary**"
+            echo '<details><summary>Ver plan</summary>'; echo; echo '```'; head -c 60000 plan.log; echo '```'; echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Guardar el resultado
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: drift-${{ matrix.project.name }}   # un artefacto por proyecto
+          path: result/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 3. Informe: tabla, issue en GitHub y color del run
+  # ---------------------------------------------------------------------------
+  report:
+    name: Informe de drift
+    needs: [list, drift]
+    # siempre que haya habido revisión (aunque algún job de drift haya fallado)
+    if: always() && needs.list.outputs.has_projects == 'true' && vars.AWS_PLAN_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write                    # crear, actualizar o cerrar el issue de drift
+    steps:
+      - name: Descargar los resultados de todos los proyectos
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: drift-*             # todos los artefactos drift-<proyecto>...
+          merge-multiple: true         # ...juntos en una sola carpeta
+          path: results
+
+      - name: Tabla de resultados
+        id: table
+        env:
+          PROJECTS: ${{ needs.list.outputs.projects }}
+        run: |
+          mkdir -p results
+          # Un proyecto sin resultado (su job se canceló o falló antes de guardarlo) cuenta como error
+          for name in $(jq -r '.[].name' <<<"$PROJECTS"); do
+            [[ -f "results/$name.json" ]] || jq -n --arg name "$name" \
+              '{name: $name, status: "error", summary: "Sin resultado: el job de este proyecto no terminó", resources: 0}' > "results/$name.json"
+          done
+          # Une los resultados respetando el orden de la plataforma (VPC → ALB → … → servicios)
+          jq -s --argjson order "$PROJECTS" \
+            'INDEX(.name) as $r | [$order[].name | $r[.]]' results/*.json > all.json
+
+          # Tabla Markdown (la misma para el resumen del run y para el issue)
+          {
+            echo "| Proyecto | Estado | Detalle |"
+            echo "|---|---|---|"
+            jq -r '.[] | "| `\(.name)` | " +
+              ({"sin-drift":"✅ sin drift","drift":"⚠️ drift","no-desplegado":"🆕 no desplegado",
+                "falta-dependencia":"🔗 falta una dependencia","error":"❌ error"}[.status]) +
+              " | \(.summary) |"' all.json
+          } > table.md
+          { echo "## Resultado de la revisión de drift"; cat table.md; } >> "$GITHUB_STEP_SUMMARY"
+
+          # ¿Hay algún proyecto que no esté sin drift?
+          problems=$(jq '[.[] | select(.status != "sin-drift")] | length' all.json)
+          echo "problems=$problems" >> "$GITHUB_OUTPUT"
+          echo "Proyectos con problemas: $problems"
+
+      - name: Abrir, actualizar o cerrar el issue de drift
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PROBLEMS: ${{ steps.table.outputs.problems }}
+        with:
+          script: |
+            const fs = require('fs');
+            const title = 'Drift de Terraform detectado';
+            // marcador oculto para reconocer el issue de este workflow
+            const marker = '<!-- terraform-drift -->';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const problems = Number(process.env.PROBLEMS);
+
+            // busca un issue ABIERTO creado por este workflow
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              ...context.repo, state: 'open', per_page: 100,
+            });
+            const existing = issues.find(i => !i.pull_request && i.body && i.body.includes(marker));
+
+            if (problems > 0) {
+              // hay problemas: crea el issue o actualiza el existente con la tabla de hoy
+              const body = [
+                marker,
+                `La revisión encontró **${problems}** proyecto(s) que no coinciden con el código de \`main\`.`,
+                '',
+                fs.readFileSync('table.md', 'utf8'),
+                '',
+                '**Qué hacer:**',
+                '- ⚠️ **drift**: revisa el plan en el run. Si el cambio se hizo a mano en la consola, vuelve a aplicar el código (workflow *Terraform* → manual → `apply`) o lleva el cambio al código con un PR.',
+                '- 🆕 **no desplegado**: despliégalo (workflow *Terraform* → manual → `apply`, en orden: VPC → ALB → cluster → ECR → servicios).',
+                '- 🔗 **falta una dependencia**: despliega antes el proyecto del que depende.',
+                '- ❌ **error**: revisa el log del job (por ejemplo, una imagen que no está en el ECR).',
+                '',
+                `_Última revisión: [run #${context.runNumber}](${runUrl})_`,
+              ].join('\n');
+              if (existing) {
+                await github.rest.issues.update({ ...context.repo, issue_number: existing.number, body });
+                core.info(`Issue #${existing.number} actualizado`);
+              } else {
+                const { data } = await github.rest.issues.create({ ...context.repo, title, body });
+                core.info(`Issue #${data.number} creado`);
+              }
+            } else if (existing) {
+              // todo sin drift: cierra el issue abierto con un comentario
+              await github.rest.issues.createComment({ ...context.repo, issue_number: existing.number,
+                body: `✅ Sin drift en la revisión del [run #${context.runNumber}](${runUrl}). Se cierra el issue.` });
+              await github.rest.issues.update({ ...context.repo, issue_number: existing.number, state: 'closed' });
+              core.info(`Issue #${existing.number} cerrado`);
+            }
+
+      - name: Resultado final
+        env:
+          PROBLEMS: ${{ steps.table.outputs.problems }}
+        run: |
+          # el run queda en ROJO si hay algún problema (GitHub avisa a quien lo lanzó)
+          if [[ "$PROBLEMS" != "0" ]]; then
+            echo "::error::Hay $PROBLEMS proyecto(s) con drift, sin desplegar o con error. Ver la tabla del resumen."
+            exit 1
+          fi
+          echo "✅ Todos los proyectos coinciden con el código."
