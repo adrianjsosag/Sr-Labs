@@ -248,7 +248,7 @@ cancel-in-progress: ${{ es un pull_request }}
 
 ## El workflow comentado, paso a paso
 
-Esta sección recorre [`workflows/terraform.yml`](workflows/terraform.yml) **de arriba abajo**, en bloques, con comentarios en español que explican qué hace cada línea y por qué. El código es el mismo que el del archivo; solo se añaden los comentarios (`#` en YAML y bash, `//` en JavaScript).
+Esta sección recorre [`workflows/terraform.yml`](workflows/terraform.yml) **de arriba abajo**, en bloques, con comentarios en español que explican qué hace cada línea y por qué (`#` en YAML y bash, `//` en JavaScript). El propio archivo lleva estos mismos comentarios y, además, una cabecera con el resumen de todo el pipeline: puedes leerlo directamente en el editor.
 
 > ℹ️ El archivo real manda. Si cambias el workflow, actualiza también esta sección.
 
