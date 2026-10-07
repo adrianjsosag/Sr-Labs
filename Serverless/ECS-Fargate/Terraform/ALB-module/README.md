@@ -235,6 +235,8 @@ terraform plan -var remote_state_local_dir=/ruta/a/states-ficticios
 
 ## Cómo desplegarlo paso a paso
 
+> 🤖 **Con el pipeline** ([GitHub Actions](../README.md#pipeline-cicd-github-actions)): haz el cambio en una rama, abre un Pull Request a `main`, revisa el `plan` que se comenta en el PR, haz merge y aprueba el despliegue. El pipeline aplica este módulo por ti. Los pasos de abajo son para desplegarlo **a mano**.
+
 ### Requisitos previos
 
 1. **El bucket del state y la VPC ya deben estar creados** ([`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md) y `VPC-module`): el ALB lee el state de la VPC desde el bucket.

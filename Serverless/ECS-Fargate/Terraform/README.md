@@ -30,13 +30,14 @@ La plataforma está dividida en **6 proyectos (módulos) independientes** que se
 6. 🔄 [Dos formas de ejecutar tus aplicaciones: Fargate o EC2](#dos-formas-de-ejecutar-tus-aplicaciones-fargate-o-ec2)
 7. 🚀 [Guía de despliegue paso a paso](#guía-de-despliegue-paso-a-paso)
 8. 📲 [Guía: desplegar mi aplicación](#guía-desplegar-mi-aplicación)
-9. 📏 [Convenciones comunes](#convenciones-comunes)
-10. 📋 [Requisitos](#requisitos)
-11. 🧪 [Probar sin crear nada](#probar-sin-crear-nada)
-12. 💰 [Costos](#costos)
-13. 🔒 [Seguridad](#seguridad)
-14. 📈 [Oportunidades de mejora (DevSecOps)](#oportunidades-de-mejora-devsecops)
-15. 🛠️ [Problemas frecuentes](#problemas-frecuentes)
+9. 🤖 [Pipeline CI/CD (GitHub Actions)](#pipeline-cicd-github-actions)
+10. 📏 [Convenciones comunes](#convenciones-comunes)
+11. 📋 [Requisitos](#requisitos)
+12. 🧪 [Probar sin crear nada](#probar-sin-crear-nada)
+13. 💰 [Costos](#costos)
+14. 🔒 [Seguridad](#seguridad)
+15. 📈 [Oportunidades de mejora (DevSecOps)](#oportunidades-de-mejora-devsecops)
+16. 🛠️ [Problemas frecuentes](#problemas-frecuentes)
 
 ---
 
@@ -141,6 +142,7 @@ flowchart TB
 | Módulo | Qué crea | Lee el state de | Recursos (`plan`) | Documentación |
 |---|---|---|---|---|
 | [`S3-tfstate-backend-module`](S3-tfstate-backend-module/) | **Una sola vez, antes que todo.** Bucket S3 privado, versionado y cifrado donde se guardan los states de todos los proyectos (bloqueo nativo, solo TLS). Su propio state es local | — | 7 | [README](S3-tfstate-backend-module/README.md) |
+| [`GitHub-OIDC-module`](GitHub-OIDC-module/) | *(Solo para el pipeline)* Proveedor OIDC de GitHub y los roles IAM de **plan** (solo lectura) y **apply** (con aprobación) que usa GitHub Actions. Se aplica a mano | — | 8 | [README](GitHub-OIDC-module/README.md) |
 | [`VPC-module`](VPC-module/) | VPC, 9 subredes (pública, privada y database × 3 AZs), Internet Gateway, NAT Gateway, tablas de rutas, DB subnet group | — | 31 | [README](VPC-module/README.md) |
 | [`EC2-bastion-host-module`](EC2-bastion-host-module/) | Bastion EC2 (Amazon Linux 2023) en una subred pública, Elastic IP, Security Group, key pair propio | VPC | 9 | [README](EC2-bastion-host-module/README.md) |
 | [`ALB-module`](ALB-module/) | Application Load Balancer público, su Security Group y el listener HTTP :80 (404 por defecto) | VPC | 5 | [README](ALB-module/README.md) |
@@ -212,6 +214,7 @@ flowchart LR
 | # | Módulo | Notas |
 |---|---|---|
 | 0 | `S3-tfstate-backend-module` | **Una sola vez**, antes que todo: crea el bucket donde se guardan los states |
+| 0b | `GitHub-OIDC-module` | *(Solo si usas el [pipeline](#pipeline-cicd-github-actions))*. Una sola vez, después del bucket: accesos de GitHub Actions a AWS |
 | 1 | `VPC-module` | Siempre el primero de la plataforma |
 | 2 | `ALB-module` | Necesita la VPC |
 | 3 | `ECS-cluster-module` | En modo Fargate no depende de nada; en modo EC2 necesita la VPC |
@@ -659,6 +662,103 @@ Todos los campos disponibles y la tabla de prioridades en uso: [README de servic
 
 ---
 
+## Pipeline CI/CD (GitHub Actions)
+
+El workflow [`.github/workflows/terraform.yml`](../../../.github/workflows/terraform.yml) valida y despliega la plataforma desde GitHub. Aplica el modelo **GitOps**: los cambios entran por un **Pull Request**, se revisan con su `plan` y se aplican tras una **aprobación**, sin ejecutar `terraform apply` desde tu PC.
+
+### Cómo funciona el proceso
+
+```mermaid
+flowchart LR
+    pr["1. Pull Request<br/>a main"] --> chk["2. fmt + validate<br/>(sin AWS)"]
+    chk --> plan["3. plan por proyecto<br/>(rol de solo lectura)<br/>comentado en el PR"]
+    plan --> rev{"4. Revisión<br/>y merge"}
+    rev --> plan2["5. plan de lo cambiado<br/>(resumen del job)"]
+    plan2 --> ok{"6. Aprobación<br/>environment production"}
+    ok --> apply["7. apply en orden<br/>(rol de apply)"]
+    apply --> smoke["8. Smoke test<br/>de los servicios"]
+```
+
+| Cuándo | Qué hace | Credenciales de AWS |
+|---|---|---|
+| **Pull Request a `main`** | Detecta qué proyectos cambiaron y ejecuta `fmt -check`, `validate` y `plan` de cada uno. Publica el plan como **comentario en el PR** (se actualiza en cada push) | Rol de **plan** (solo lectura) |
+| **Merge a `main`** | Vuelve a mostrar el plan. Después **espera la aprobación** del environment `production` y aplica los proyectos cambiados **en orden**: VPC → ALB → cluster → ECR → servicios. Al final comprueba con `curl` que cada servicio aplicado responde 200 | Plan: rol de plan. Apply: rol de **apply**, solo tras aprobar |
+| **Manual** (*Actions → Terraform → Run workflow*) | `plan`, `apply` o `destroy` de **un** proyecto, con aprobación | Igual que arriba |
+
+📌 **Detalles importantes:**
+- **Solo reacciona a cambios de Terraform:** archivos `.tf`, `.tfvars` y `.terraform.lock.hcl` dentro de `<proyecto>/manifests/`. Un cambio en `ECS-services-module/modules/` afecta a **todos** los servicios. Cambiar un README no dispara ningún `plan`.
+- **Cada proyecto se vuelve a planificar justo antes de su `apply`.** Así ve los outputs que el proyecto anterior acaba de aplicar; por ejemplo, el ALB ve las subredes nuevas de la VPC.
+- **Un despliegue a la vez:** un segundo merge espera a que termine el primero, y nunca se cancela un `apply` a medias.
+
+### Qué se aplica automáticamente
+
+| Proyecto | En el PR | Tras el merge |
+|---|---|---|
+| VPC, ALB, cluster, ECR y servicios | `validate` + `plan` | ✅ `apply` en orden, tras la aprobación |
+| [`EC2-bastion-host-module`](EC2-bastion-host-module/README.md) | `validate` + `plan` | ⚠️ Solo un aviso: aplícalo **desde tu PC** o con el [workflow manual](#workflow-manual). Sus provisioners se conectan por SSH desde quien aplica y el `.pem` se escribe en ese equipo |
+| [`S3-tfstate-backend-module`](S3-tfstate-backend-module/README.md) y [`GitHub-OIDC-module`](GitHub-OIDC-module/README.md) | Ignorados | Ignorados: **siempre a mano** (el pipeline no puede tocar su bucket ni sus permisos) |
+| Imágenes Docker del ECR | — | **No:** súbelas con `ECR-module/push-image.sh` desde tu PC **antes** del merge. Si un servicio usa un `image_tag` que no existe, su `plan` falla |
+
+### Puesta en marcha (una sola vez)
+
+1. **Bucket del state:** aplica [`S3-tfstate-backend-module`](S3-tfstate-backend-module/README.md) (si aún no existe).
+2. **Accesos del pipeline:** aplica [`GitHub-OIDC-module`](GitHub-OIDC-module/README.md) y anota sus outputs:
+   ```bash
+   cd ~/Sr-Labs/Serverless/ECS-Fargate/Terraform/GitHub-OIDC-module/manifests
+   terraform init && terraform apply           # 8 to add
+   terraform output
+   ```
+3. **Environment con aprobación.** En GitHub: *Settings → Environments → New environment* → `production`.
+   - Activa *Required reviewers* (tú o tu equipo).
+   - En *Deployment branches*, deja solo `main`.
+   > ⚠️ Sin revisores, el apply se ejecuta sin esperar a nadie.
+4. **Variables del repositorio.** *Settings → Secrets and variables → Actions → **Variables*** (no son secretos; un ARN no es confidencial):
+
+   | Variable | Valor |
+   |---|---|
+   | `AWS_REGION` | `us-east-1` |
+   | `AWS_PLAN_ROLE_ARN` | `terraform output -raw plan_role_arn` |
+   | `AWS_APPLY_ROLE_ARN` | `terraform output -raw apply_role_arn` |
+
+   Mientras no existan estas variables, el workflow solo ejecuta `fmt` y `validate`, y avisa de que se omiten `plan` y `apply`.
+5. **Proteger `main`.** *Settings → Rules → Rulesets → New branch ruleset* sobre `main`:
+   - *Require a pull request before merging*, con al menos 1 aprobación.
+   - *Require status checks to pass*: `fmt + validate`.
+   - *Block force pushes*.
+
+✅ **Comprobación:** abre un PR que cambie, por ejemplo, `desired_count` en `ECS-services-module/services/nginx-2/manifests/service.auto.tfvars`.
+1. El PR debe recibir el comentario del plan (`1 to change`).
+2. Tras el merge, el job de apply pide aprobación, aplica y el smoke test pasa.
+
+### Flujo diario
+
+```bash
+git switch -c cambio-nginx-2                  # 1. rama nueva
+# 2. edita los .tf / .tfvars (y, si es una versión nueva, sube antes la imagen con push-image.sh)
+git add . && git commit -m "nginx-2: 3 tareas"
+git push -u origin cambio-nginx-2             # 3. sube la rama
+```
+
+4. Abre el Pull Request a `main` y revisa el comentario del plan. **Fíjate en `to destroy`.**
+5. Haz merge.
+6. En *Actions*, abre el run y pulsa **Review deployments → Approve**.
+
+> ⚠️ **Eliminar un servicio:** primero `destroy` con el [workflow manual](#workflow-manual) y **después** borra su directorio en un PR. Si borras el directorio primero, el pipeline solo avisa y los recursos se quedan en AWS.
+
+### Workflow manual
+
+*Actions → Terraform → Run workflow*, desde la rama `main`:
+
+| Entrada | Valores |
+|---|---|
+| `project` | `VPC-module`, `ALB-module`, `ECS-cluster-module`, `EC2-bastion-host-module`, `ECR-module` o `service` |
+| `service_name` | Solo si `project = service`: el nombre del directorio, por ejemplo `nginx-1` |
+| `action` | `plan` (solo mirar), `apply` o `destroy` |
+
+Siempre muestra primero el plan (con `-destroy` si la acción es `destroy`). Para `apply` y `destroy` espera la aprobación del environment `production`.
+
+---
+
 ## Convenciones comunes
 
 Todos los módulos siguen el mismo patrón, así que si entiendes uno, entiendes todos:
@@ -674,6 +774,7 @@ Todos los módulos siguen el mismo patrón, así que si entiendes uno, entiendes
 | **Variables generales** | `aws_region = us-east-1`, `environment = stag`, `business_divsion = CloudEngineering`. **Deben coincidir en todos los módulos** |
 | **Versiones** | Terraform `>= 1.16`, provider AWS `~> 6.67`, módulos de `terraform-aws-modules` con **versión fija** |
 | **State** | En el **bucket S3** de [`S3-tfstate-backend-module`](S3-tfstate-backend-module/README.md): privado, cifrado (SSE-S3), versionado y con bloqueo nativo. Cada `manifests/backend.tf` tiene su propia `key` (`VPC-module/terraform.tfstate`, `ECS-services-module/services/<nombre>/terraform.tfstate`…). Los proyectos se leen entre sí con `terraform_remote_state` (backend `s3`). El módulo del bucket es el único con state local |
+| **Pipeline** | GitHub Actions ([`terraform.yml`](../../../.github/workflows/terraform.yml)): `plan` en cada PR y `apply` en orden tras el merge y una aprobación. Ver [Pipeline CI/CD](#pipeline-cicd-github-actions) |
 | **Llaves SSH** | Se generan con Terraform y se guardan en `manifests/private-key/`. Bastion y cluster EC2 usan llaves **distintas** |
 | **Git** | El [`.gitignore`](../../../.gitignore) de la raíz ignora `.terraform/`, `*.tfstate`, `*.pem`, `private-key/` y las copias de seguridad del script. **Sí** se suben `.terraform.lock.hcl` y los `.tfvars` |
 
@@ -843,7 +944,7 @@ Las 6 mejoras con **mayor impacto en seguridad** para empezar:
 | # | Mejora | Por qué primero |
 |---|---|---|
 | 1 | ✅ **State remoto en S3, cifrado, versionado y con bloqueo** *(implementado: `S3-tfstate-backend-module`)* | Un state perdido o filtrado compromete toda la plataforma: contiene **llaves privadas**. **Pendiente:** llave KMS propia y limitar quién lee el bucket |
-| 2 | **Pipeline CI/CD con OIDC + escáneres de IaC y de secretos** | Elimina la necesidad de credenciales locales de larga duración y bloquea configuraciones inseguras antes de aplicarlas |
+| 2 | ✅ **Pipeline CI/CD con OIDC** *(implementado: `terraform.yml` + `GitHub-OIDC-module`)* **+ escáneres de IaC y de secretos** | Sin credenciales de larga duración y con aprobación antes de aplicar. **Pendiente:** escáneres (tflint, checkov, gitleaks) en el PR |
 | 3 | **HTTPS (ACM + Route 53) y AWS WAF en el ALB** | Hoy el tráfico viaja **sin cifrar** por HTTP :80, sin protección frente a ataques web |
 | 4 | **SSM Session Manager en lugar de SSH y llaves** | Elimina el puerto 22, las llaves en el state y la llave copiada en `/tmp` del Bastion |
 | 5 | **Secretos en AWS Secrets Manager** | Evita poner credenciales en `environment` (texto plano en la task definition y en el state) |
@@ -893,11 +994,11 @@ Las 6 mejoras con **mayor impacto en seguridad** para empezar:
 
 | Mejora | Situación actual | Cómo implementarlo | Dónde | Prio. | Esf. | Marco |
 |---|---|---|---|---|---|---|
-| **Pipeline CI/CD de infraestructura** | `apply` manual desde un portátil | GitHub Actions / GitLab CI / CodePipeline. En el PR: `fmt`, `validate`, `tflint`, checkov, `plan` (comentado en el PR y guardado como artefacto). En el merge: `apply` del **mismo** plan tras **aprobación manual** en entornos protegidos | `.github/workflows/` | 🔴 | M | SSDF PS, WA-OPS |
-| **Autenticación OIDC sin claves** | Se usan credenciales locales de larga duración (perfil de `~/.aws/credentials`) | **OIDC** del proveedor de CI → `AssumeRoleWithWebIdentity`. Rol de **plan** (solo lectura) separado del rol de **apply**, uno por entorno | IAM + pipeline | 🔴 | M | CIS 1.x, WA-SEC 2 |
+| ✅ **Pipeline CI/CD de infraestructura** *(implementado)* | **Hecho:** GitHub Actions ([`terraform.yml`](../../../.github/workflows/terraform.yml)). En el PR: `fmt`, `validate` y `plan` comentado en el PR. En el merge: plan → **aprobación manual** (environment `production`) → `apply` en orden y smoke test | **Pendiente:** tflint, checkov y gitleaks en el PR; aplicar el plan **guardado y revisado** (hoy cada proyecto se vuelve a planificar justo antes de su `apply`) | `.github/workflows/` | 🔴 | M | SSDF PS, WA-OPS |
+| ✅ **Autenticación OIDC sin claves** *(implementado)* | **Hecho:** OIDC de GitHub → `AssumeRoleWithWebIdentity` ([`GitHub-OIDC-module`](GitHub-OIDC-module/README.md)). Rol de **plan** (solo lectura) separado del rol de **apply** (solo desde el environment con aprobación) | **Pendiente:** un par de roles por entorno o cuenta, y *permissions boundary* para los roles que crea el pipeline | `GitHub-OIDC-module` | 🔴 | M | CIS 1.x, WA-SEC 2 |
 | ✅ **State remoto seguro** *(implementado)* | **Hecho:** bucket S3 con versionado, cifrado **SSE-S3**, *Block Public Access*, política que exige TLS y bloqueo nativo (`use_lockfile = true`). `terraform_remote_state` con `backend = "s3"` | **Pendiente:** cifrado **SSE-KMS** con llave propia (CMK) y política del bucket que solo permita a los usuarios y roles que despliegan | `S3-tfstate-backend-module` + todos los módulos | 🔴 | S | CIS, WA-SEC 8 |
 | **Desacoplar módulos** | Cada módulo lee el **state completo** de otros, que incluye datos sensibles | Publicar solo los valores necesarios en **SSM Parameter Store** (`/platform/stag/alb/listener_arn`) y leerlos con `data "aws_ssm_parameter"`. Así se aplica mínimo privilegio sobre el state | Outputs → SSM | 🟠 | M | WA-SEC |
-| **Orquestación del orden** | El orden VPC → ALB → Cluster → ECR → Servicios se sigue a mano | Terragrunt (`dependency`) o pipeline por etapas con dependencias explícitas | Pipeline | 🟢 | M | WA-OPS |
+| **Orquestación del orden** | El pipeline aplica los módulos cambiados en orden (VPC → ALB → cluster → ECR → servicios). El bucket, OIDC y el Bastion se aplican a mano | Terragrunt (`dependency`) si el número de módulos crece | Pipeline | 🟢 | M | WA-OPS |
 | **Despliegues seguros de aplicaciones** | Despliegue *rolling* por defecto | `deployment_circuit_breaker` con **rollback** explícito. Despliegues **blue/green** o canary (soportados por el módulo de servicios) y alarmas que detengan el despliegue | `ECS-services-module/modules/ecs-service/main.tf` | 🟠 | M | WA-REL |
 
 ### 6. Operar (endurecimiento en ejecución)
@@ -933,7 +1034,7 @@ Las 6 mejoras con **mayor impacto en seguridad** para empezar:
 ```mermaid
 flowchart LR
     F1["Fase 1 – Fundamentos<br/>(semanas 1-2)<br/>• ✅ State S3 cifrado + bloqueo (hecho)<br/>• Pre-commit: checkov, tflint, gitleaks<br/>• Restringir CIDRs / quitar SSH abierto<br/>• CloudTrail + GuardDuty<br/>• HTTPS con ACM"]
-    F2["Fase 2 – Pipeline seguro<br/>(semanas 3-6)<br/>• CI/CD con OIDC y aprobaciones<br/>• Policy as Code (OPA/Conftest)<br/>• ✅ ECR + escaneo + digest (hecho)<br/>• Inspector + KMS en ECR<br/>• Secrets Manager<br/>• SSM en lugar de Bastion/llaves<br/>• terraform test + alarmas"]
+    F2["Fase 2 – Pipeline seguro<br/>(semanas 3-6)<br/>• ✅ CI/CD con OIDC y aprobaciones (hecho)<br/>• Policy as Code (OPA/Conftest)<br/>• ✅ ECR + escaneo + digest (hecho)<br/>• Inspector + KMS en ECR<br/>• Secrets Manager<br/>• SSM en lugar de Bastion/llaves<br/>• terraform test + alarmas"]
     F3["Fase 3 – Madurez<br/>(trimestre)<br/>• Multi-cuenta + SCPs<br/>• WAF + logs de acceso + Flow Logs<br/>• SBOM y firma de imágenes<br/>• DAST con ZAP<br/>• Security Hub + Config<br/>• VPC endpoints, blue/green<br/>• Cambio de modo nativo (sin script)"]
     F1 --> F2 --> F3
 ```
@@ -962,6 +1063,9 @@ flowchart LR
 | `NoSuchBucket` / `S3 bucket does not exist` al hacer `terraform init` | El bucket del state aún no existe, o el `bucket` de `backend.tf` no coincide | Aplica [`S3-tfstate-backend-module`](S3-tfstate-backend-module/README.md) ([paso 0](#paso-0-bucket-s3-del-state-obligatorio-una-sola-vez)) |
 | `Backend configuration changed` / `Backend initialization required` al hacer `terraform init` | Ese `manifests/` se inicializó antes con otro backend (por ejemplo, con el state local) | `terraform init -migrate-state` para copiar el state al bucket, o `-reconfigure` si no hay nada que copiar. Ver [Migrar states locales](S3-tfstate-backend-module/README.md#migrar-states-locales-al-bucket) |
 | `Error acquiring the state lock` | Otro `plan`/`apply` está usando ese state, o uno anterior se interrumpió | Espera. Si nadie lo usa: `terraform force-unlock <LOCK_ID>`, con el ID que muestra el error |
+| Pipeline: `Not authorized to perform sts:AssumeRoleWithWebIdentity` | El repositorio, la rama o el environment no coinciden con los `sub` aceptados por los roles | Revisa `terraform output github_oidc_subjects` en [`GitHub-OIDC-module`](GitHub-OIDC-module/README.md#problemas-frecuentes) |
+| Pipeline: "se omiten plan y apply" | Faltan las variables del repositorio `AWS_PLAN_ROLE_ARN`, `AWS_APPLY_ROLE_ARN` o `AWS_REGION` | Ver [Puesta en marcha](#puesta-en-marcha-una-sola-vez) |
+| Pipeline: el apply se queda en *Waiting* | Espera la aprobación del environment `production` | *Review deployments → Approve* en la página del run |
 | `Unsupported attribute "…"` al leer un remote state | El state del otro módulo es de una versión anterior, sin ese output | Ejecuta `terraform apply` en el otro módulo para actualizar sus outputs |
 | Los nombres no coinciden entre módulos | `environment`, `business_divsion` o `aws_region` distintos en algún `terraform.tfvars` | Usa los mismos valores en todos |
 | `curl` al ALB responde `404: no hay ningun servicio en esta ruta` | No hay servicios desplegados o la ruta no coincide | Despliega `ECS-services-module` o revisa `path_patterns` |

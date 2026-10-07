@@ -356,6 +356,8 @@ terraform plan -var remote_state_local_dir=/ruta/a/states-ficticios
 
 ## Cómo desplegarlo paso a paso
 
+> 🤖 **El pipeline no aplica el Bastion automáticamente:** sus provisioners se conectan por SSH desde quien aplica, y el `.pem` quedaría en el runner y se perdería. En un Pull Request solo se muestra su `plan`. Aplícalo a mano con estos pasos, o con el [workflow manual](../README.md#workflow-manual) si aceptas perder el `.pem` local (la llave sigue en el state).
+
 ### Requisitos previos
 
 1. **El bucket del state y la VPC ya deben estar creados** ([`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md) y `VPC-module`). Sin el state de la VPC en el bucket, este proyecto no puede saber dónde crearse.
