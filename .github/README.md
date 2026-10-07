@@ -721,9 +721,25 @@ Variables opcionales: `TF_ROOT` (por defecto `Serverless/ECS-Fargate/Terraform`)
 
 | Variable | Valor | La usa |
 |---|---|---|
-| `AWS_REGION` | `us-east-1` | `plan` y `apply` |
+| `AWS_REGION` | `us-east-1` | La action de credenciales en `plan` y `apply` (ver [por qué](#por-qué-aws_region-si-los-módulos-ya-tienen-región)) |
 | `AWS_PLAN_ROLE_ARN` | Output `plan_role_arn` de `GitHub-OIDC-module` | `plan`. Si está vacía, `plan` y `apply` se saltan con un aviso |
 | `AWS_APPLY_ROLE_ARN` | Output `apply_role_arn` de `GitHub-OIDC-module` | `apply`. Si está vacía, `apply` se salta |
+
+### ¿Por qué `AWS_REGION` si los módulos ya tienen región?
+
+Los módulos Terraform ya definen su región, pero el workflow necesita **otra** antes de que Terraform se ejecute. Cada valor tiene un uso distinto:
+
+| Quién | De dónde toma la región | Para qué |
+|---|---|---|
+| Módulos Terraform (provider `aws`) | `aws_region` en el `terraform.tfvars` de cada proyecto (`provider "aws" { region = var.aws_region }`) | **Dónde se crean los recursos** (VPC, ALB, ECS…) |
+| Backend del state | `region` en el `backend.tf` de cada proyecto | **Dónde está el bucket** del state |
+| Action `aws-actions/configure-aws-credentials` | `vars.AWS_REGION` (variable del repositorio) | **Obtener las credenciales**: llamar a AWS STS (`AssumeRoleWithWebIdentity`) con el token OIDC |
+
+📌 **Detalles importantes:**
+- **La action exige el parámetro `aws-region`.** Se ejecuta **antes** que Terraform y no lee los `.tfvars`, así que no puede saber qué región usan los módulos.
+- **Terraform no usa esa región.** La action exporta `AWS_REGION` y `AWS_DEFAULT_REGION` en el runner, pero el provider usa `var.aws_region` de forma explícita y el backend tiene su `region` escrita en `backend.tf`.
+- **Las credenciales valen para cualquier región.** Un valor distinto en `AWS_REGION` **no cambia dónde se despliega**. Aun así, mantén `us-east-1`, igual que los módulos, para que todo sea coherente y fácil de entender.
+- **Si algún día cambias de región**, actualiza los tres sitios: `aws_region` en los `terraform.tfvars`, `region` en los `backend.tf` (ver [S3-tfstate-backend-module](../Serverless/ECS-Fargate/Terraform/S3-tfstate-backend-module/README.md#cómo-funciona)) y esta variable del repositorio.
 
 **Environment `production`:** revisores obligatorios y, como rama permitida, solo `main`. Su nombre **debe coincidir** con `github_environment` de `GitHub-OIDC-module`.
 

@@ -164,7 +164,7 @@ GitHub-OIDC-module/
 |---|---|
 | `plan_role_arn` | Variable de GitHub **`AWS_PLAN_ROLE_ARN`** |
 | `apply_role_arn` | Variable de GitHub **`AWS_APPLY_ROLE_ARN`** |
-| `aws_region` | Variable de GitHub **`AWS_REGION`** |
+| `aws_region` | Variable de GitHub **`AWS_REGION`**. Solo la usa la action que obtiene las credenciales; los módulos toman su región de sus `terraform.tfvars` (ver [por qué](../../../../.github/README.md#por-qué-aws_region-si-los-módulos-ya-tienen-región)) |
 | `github_oidc_subjects` | Los `sub` aceptados por cada rol. Útil para depurar errores de `AssumeRoleWithWebIdentity` |
 
 ---
