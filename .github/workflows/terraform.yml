@@ -30,7 +30,7 @@
 #   - EC2-bastion-host-module: excluido por completo (ni plan ni apply). Se gestiona desde tu PC.
 #   - Imágenes Docker: se suben con ECR-module/push-image.sh desde tu PC, antes del merge.
 #
-# DOCUMENTACIÓN: .github/README.md (incluye este archivo explicado paso a paso)
+# DOCUMENTACIÓN: .github/workflows/README-terraform.md (incluye este archivo explicado paso a paso)
 # =============================================================================
 name: "Terraform"                      # nombre que aparece en la pestaña Actions
 

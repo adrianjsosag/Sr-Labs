@@ -8,7 +8,7 @@ Se aplica **una sola vez y a mano**, después del bucket del state y antes de us
 |---|---|
 | **Paso en el despliegue** | **0b** – solo si usas el pipeline, después del bucket del state ([guía](../README.md#pipeline-cicd-github-actions)) |
 | **Depende de** | Bucket del state ([`S3-tfstate-backend-module`](../S3-tfstate-backend-module/README.md)) |
-| **Lo usan** | El workflow `.github/workflows/terraform.yml` (variables `AWS_PLAN_ROLE_ARN` y `AWS_APPLY_ROLE_ARN`) |
+| **Lo usan** | El workflow `.github/workflows/terraform.yml` (variables `AWS_PLAN_ROLE_ARN` y `AWS_APPLY_ROLE_ARN`) y `.github/workflows/check-terraform-drift.yml` (solo `AWS_PLAN_ROLE_ARN`) |
 | **Recursos (`plan`)** | 8 |
 | **Tiempo de despliegue** | Menos de 1 min |
 | **Costo principal** | Ninguno: IAM y OIDC no tienen costo |
@@ -164,7 +164,7 @@ GitHub-OIDC-module/
 |---|---|
 | `plan_role_arn` | Variable de GitHub **`AWS_PLAN_ROLE_ARN`** |
 | `apply_role_arn` | Variable de GitHub **`AWS_APPLY_ROLE_ARN`** |
-| `aws_region` | Variable de GitHub **`AWS_REGION`**. Solo la usa la action que obtiene las credenciales; los módulos toman su región de sus `terraform.tfvars` (ver [por qué](../../../../.github/README.md#por-qué-aws_region-si-los-módulos-ya-tienen-región)) |
+| `aws_region` | Variable de GitHub **`AWS_REGION`**. Solo la usa la action que obtiene las credenciales; los módulos toman su región de sus `terraform.tfvars` (ver [por qué](../../../../.github/workflows/README-terraform.md#por-qué-aws_region-si-los-módulos-ya-tienen-región)) |
 | `github_oidc_subjects` | Los `sub` aceptados por cada rol. Útil para depurar errores de `AssumeRoleWithWebIdentity` |
 
 ---
@@ -207,7 +207,7 @@ terraform apply         # escribe "yes"
 terraform output        # anota plan_role_arn, apply_role_arn y aws_region
 ```
 
-Después termina la configuración en GitHub (environment `production`, variables del repositorio y protección de `main`): ver [Puesta en marcha del pipeline](../../../../.github/README.md#puesta-en-marcha-una-sola-vez).
+Después termina la configuración en GitHub (environment `production`, variables del repositorio y protección de `main`): ver [Puesta en marcha del pipeline](../../../../.github/workflows/README-terraform.md#puesta-en-marcha-una-sola-vez).
 
 ### Eliminar
 
